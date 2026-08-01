@@ -5,11 +5,11 @@ using BencodeNET.Parsing;
 
 namespace Fiumara.Core;
 
-public class TrackerClient
+public class TrackerClient(string PeerId)
 {
     private static readonly BencodeParser Parser = new();
     private readonly HttpClient _httpClient = new();
-    private readonly string _peerid = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
+    private readonly string _peerid = PeerId;
     private readonly string _port = "6881";
 
     public async Task<List<IPEndPoint>>GetPeersAsync(TorrentInfo parsed)
