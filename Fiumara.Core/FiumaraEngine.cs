@@ -67,7 +67,6 @@ public class FiumaraEngine
     public async Task DownloadAsync()
     {
          bool isDownloaded = false; // we are leechers for now
-
          while (!isDownloaded)
          {
              foreach (var peer in _activePeers.Values)

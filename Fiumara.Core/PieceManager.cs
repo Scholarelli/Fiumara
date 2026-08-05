@@ -1,4 +1,5 @@
 using System.Net;
+using BencodeNET.Torrents;
 
 namespace Fiumara.Core;
 
@@ -18,14 +19,6 @@ public enum PieceState
     Completed
 };
 
-public class PieceInfo
-{
-    public int index {get; set;}
-    public PieceState State {get; set;} = PieceState.Missing;
-    public HashSet<IPEndPoint> peersWithPiece { get; } = [];
-
-}
-
 public class Piece
 {
     public int Index { get; }
@@ -35,7 +28,9 @@ public class Piece
 
     public byte[]? Buffer {get; private set;}
 
-    public Piece(int index, int pieceSize, byte[] expectedHash)
+    public HashSet<IPEndPoint> AvailableOnPeers { get; } = new();
+
+    public Piece(int index, long pieceSize, byte[] expectedHash)
     {
         Index = index;
         ExpectedHash = expectedHash;
@@ -57,18 +52,30 @@ public class Piece
     }
 
     public bool IsComplete() => Blocks.All(b => b.State == State.Completed);
+    public bool IsFullyRequested() => Blocks.All(b => b.State != State.Missing);
+
+    public int Rarity => AvailableOnPeers.Count;
 }
 
 public class PieceManager
 {
-    private readonly PieceInfo[] _pieces;
+    private readonly Piece[] _pieces;
 
-    public PieceManager(int totalPieces)
+    public PieceManager(TorrentInfo torrent)
     {
-        _pieces = new PieceInfo[totalPieces];
+        int totalPieces = (int)Math.Ceiling((double)torrent.TotalSize / torrent.PieceLength);
+        _pieces = new Piece[totalPieces];
+
+        ReadOnlySpan<byte> allHashes = torrent.Pieces.ToArray();
         for (int i = 0; i < totalPieces; i++)
         {
-            _pieces[i] = new PieceInfo { index = i };
+            byte[] expectedHash = allHashes.Slice(i * 20, 20).ToArray();
+
+            var remainingBytes = torrent.TotalSize - (i * torrent.PieceLength);
+            var actualPieceSize = Math.Min(torrent.PieceLength, remainingBytes);
+            _pieces[i] = new Piece(i,
+                actualPieceSize,
+                expectedHash);
         }
     }
 
@@ -76,9 +83,9 @@ public class PieceManager
     {
         foreach (var peer in _pieces)
         {
-            if (peerBitField[peer.index])
+            if (peerBitField[peer.Index])
             {
-                peer.peersWithPiece.Add(endPoint);
+                peer.AvailableOnPeers.Add(endPoint);
             }
         }
 
@@ -88,18 +95,18 @@ public class PieceManager
     {
         foreach (var peer in _pieces)
         {
-            if (peerBitField[peer.index])
-                peer.peersWithPiece.Remove(endPoint);
+            if (peerBitField[peer.Index])
+                peer.AvailableOnPeers.Remove(endPoint);
         }
     }
 
-    public PieceInfo? GetNextPieceToDownload(IPEndPoint unchokedPeer)
+    public Piece? GetNextPieceToDownload(IPEndPoint unchokedPeer)
     {
         foreach (var piece in _pieces)
         {
-            if (piece.State == PieceState.Missing && piece.peersWithPiece.Count > 0)
+            if (!piece.IsComplete() && piece.AvailableOnPeers.Count > 0)
             {
-                piece.State = PieceState.Pending;
+
                 return piece;
             }
         }

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Numerics;
 using System.Text;
 
 namespace Fiumara.Core;
@@ -10,16 +11,34 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     private TcpClient? _tcpClient;
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
-    private readonly Action<PeerConnection> _onDisconnected = onDisconnected;
 
-    private enum MessageType
+    private enum MessageType : byte
     {
-        KeepAlive = 0,
-        Choke,
-        Unchoke,
-        Interested,
-        NotInterested,
-        Have
+        Choke = 0,
+        Unchoke = 1,
+        Interested = 2,
+        NotInterested = 3,
+        Have = 4,
+        Bitfield = 5,
+        Request = 6,
+        Piece = 7,
+        Cancel = 8
+    }
+    public bool[] PeerBitfield { get; private set; } = [];
+
+    public async Task ConnectAsync(CancellationToken externalToken = default)
+    {
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+
+        _tcpClient = new TcpClient();
+        await _tcpClient.ConnectAsync(endpoint.Address, endpoint.Port, _cts.Token);
+
+        _stream = _tcpClient.GetStream();
+
+        await PerformHandshakeAsync(_cts.Token);
+
+
+        _ = Task.Run(() => ReceiveMessageAsync(_cts.Token), _cts.Token);
     }
 
     private byte[] CreateHandshakeMessage()
@@ -39,33 +58,24 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         return handshake;
     }
 
-    public async Task ConnectAsync(CancellationToken externalToken = default)
+    private async Task PerformHandshakeAsync(CancellationToken cancellationToken)
     {
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
-        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
 
-        _tcpClient = new TcpClient();
-        await _tcpClient.ConnectAsync(endpoint.Address, endpoint.Port, handshakeCts.Token);
-
-        _stream = _tcpClient.GetStream();
-
-        // Send handshake
         var handshakeMessage = CreateHandshakeMessage();
-        await _stream.WriteAsync(handshakeMessage, handshakeCts.Token);
+        await _stream!.WriteAsync(handshakeMessage, handshakeCts.Token);
 
-        // Read handshake response
         var responseBuffer = new byte[68];
         await _stream.ReadExactlyAsync(responseBuffer, handshakeCts.Token);
 
-        // Validate handshake response
+
         if (!ValidateHandshakeResponse(responseBuffer))
         {
             throw new Exception("Invalid handshake response from peer.");
         }
 
-        Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
-        await ReceiveMessageAsync(_cts.Token);
+
     }
 
     private bool ValidateHandshakeResponse(byte[] response)
@@ -81,6 +91,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         return responseHash.SequenceEqual(infoHash);
     }
 
+
     public async Task ReceiveMessageAsync(CancellationToken cancellationToken)
     {
         try
@@ -92,23 +103,82 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                 var messageLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBuffer);
 
                 if (messageLength == 0) continue;
+
                 var messageBuffer = new byte[messageLength];
                 await _stream.ReadExactlyAsync(messageBuffer, cancellationToken);
 
-                var messageId = messageBuffer[0];
-                Console.WriteLine($"Received message of length {messageLength}: {BitConverter.ToString(messageBuffer)}");
+                var messageId = (MessageType)messageBuffer[0];
+                var payload = messageBuffer.AsSpan(1);
+
+                switch (messageId)
+                {
+                    case MessageType.Have:
+                        ParseHave(payload);
+                        break;
+                    case MessageType.Bitfield:
+                        ParseBitField(payload);
+                        break;
+                    default:
+                        Console.WriteLine($"Received message of type {messageId} with length {messageLength}");
+                        break;
+
+                }
             }
         } catch (Exception e)
         {
             Console.WriteLine(e);
         } finally{
-            _onDisconnected(this);
+            onDisconnected(this);
         }
     }
 
     public void Disconnect()
     {
         _cts?.Cancel();
+    }
+
+    private void ParseHave(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length != 4)
+        {
+            Console.WriteLine("Invalid Have message length.");
+            return;
+        }
+
+        int pieceIndex = BinaryPrimitives.ReadInt32BigEndian(payload);
+
+        if (pieceIndex >= 0 && pieceIndex < PeerBitfield.Length)
+        {
+            if (PeerBitfield[pieceIndex]) return;
+            PeerBitfield[pieceIndex] = true;
+            Console.WriteLine($"Peer just acquired piece {pieceIndex}.");
+        }
+        else
+        {
+            Console.WriteLine($"Peer sent out-of-bounds Have message: {pieceIndex}");
+            Disconnect();
+        }
+    }
+
+    private void ParseBitField(ReadOnlySpan<byte> payload)
+    {
+        PeerBitfield = new bool[payload.Length * 8];
+
+        int piecesAvailable = 0;
+        for (int i = 0; i < payload.Length; i++)
+        {
+            byte b = payload[i];
+
+            piecesAvailable = BitOperations.PopCount(b);
+
+            int baseIndex = i * 8;
+            for(int bit = 0; bit < 8; bit++) {
+                // We gotta adapt to big endian
+                PeerBitfield[baseIndex + bit] = (b & (1 << (7 - bit))) != 0;
+
+            }
+        }
+
     }
 
     public void Dispose()

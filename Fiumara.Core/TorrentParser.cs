@@ -4,7 +4,7 @@ using BencodeNET.Parsing;
 using BencodeNET.Torrents;
 
 
-public record struct TorrentInfo(
+public readonly record struct TorrentInfo(
     string Name,
     IReadOnlyList<Uri> AnnounceList,
     bool IsSingleFile,
