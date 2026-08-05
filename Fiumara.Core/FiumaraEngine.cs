@@ -1,11 +1,16 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Reflection.Metadata;
+using System.Threading.Channels;
 using BencodeNET.Torrents;
+using Fiumara.Core.Events;
 
 namespace Fiumara.Core;
 
 public class FiumaraEngine
 {
+    private readonly Channel<PeerEvent> _eventChannel = Channel.CreateUnbounded<PeerEvent>();
+    private PieceManager _pieceManager;
 
     private static readonly string PeerId = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
     private readonly TrackerClient _trackerClient = new(PeerId);
@@ -25,8 +30,8 @@ public class FiumaraEngine
                 Console.WriteLine("Could not get  peer");
                 break;
             };
-            var peer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId,
-                connection => HandlePeerDisconnect(connection, endpoint));
+            var peer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
+
             _activePeers.TryAdd(endpoint, peer);
             connectionTasks.Add(peer.ConnectAsync());
         }
@@ -37,11 +42,12 @@ public class FiumaraEngine
     public async Task StartAsync(TorrentInfo torrentInfo)
     {
         _torrent = torrentInfo;
+        _pieceManager = new PieceManager(_torrent);
         var trackerResponse = await _trackerClient.GetPeersAsync(torrentInfo);
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
 
         await ConnectAsync(5); // Start with one peer for now
-        await DownloadAsync();
+        _ = Task.Run(ProcessEventsAsync);
     }
 
     private void HandlePeerDisconnect(PeerConnection deadPeer, IPEndPoint endPoint)
@@ -53,7 +59,7 @@ public class FiumaraEngine
         {
             var endpoint = _waitingRoom.TryDequeue(out var ep) ? ep : null;
             if (endpoint == null) return;
-            var newPeer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, connection => HandlePeerDisconnect(connection, endpoint));
+            var newPeer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
             _activePeers.TryAdd(endpoint, newPeer);
             newPeer.ConnectAsync().ContinueWith(t =>
             {
@@ -64,15 +70,22 @@ public class FiumaraEngine
         }
     }
 
-    public async Task DownloadAsync()
+    private async Task ProcessEventsAsync()
     {
-         bool isDownloaded = false; // we are leechers for now
-         while (!isDownloaded)
-         {
-             foreach (var peer in _activePeers.Values)
-             {
-
-             }
-         }
+        await foreach (var peerEvent in _eventChannel.Reader.ReadAllAsync())
+        {
+            switch (peerEvent)
+            {
+                case BitfieldReceived b:
+                    // do somethign
+                    break;
+                case HaveReceived h:
+                    _pieceManager.RegisterPeerPiece(h.Peer.Endpoint, h.PieceIndex);
+                    break;
+                case PeerDisconnected d:
+                    HandlePeerDisconnect(d.Peer, d.Peer.Endpoint);
+                    break;
+            }
+        }
     }
 }

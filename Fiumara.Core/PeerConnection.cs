@@ -3,14 +3,20 @@ using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
 using System.Text;
+using System.Threading.Channels;
+using Fiumara.Core.Events;
 
 namespace Fiumara.Core;
 
-public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, Action<PeerConnection> onDisconnected) : IDisposable
+public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<PeerEvent> engineChannel) : IDisposable
 {
+    public IPEndPoint Endpoint => endpoint;
     private TcpClient? _tcpClient;
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
+    private readonly ChannelWriter<PeerEvent>? _engineChannel = engineChannel;
+
+
 
     private enum MessageType : byte
     {
@@ -29,6 +35,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     public async Task ConnectAsync(CancellationToken externalToken = default)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+
+
 
         _tcpClient = new TcpClient();
         await _tcpClient.ConnectAsync(endpoint.Address, endpoint.Port, _cts.Token);
@@ -97,7 +105,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         try
         {
             var lengthBuffer = new byte[4];
-            while(!cancellationToken.IsCancellationRequested && _stream is { CanRead: true })
+            while (!cancellationToken.IsCancellationRequested && _stream is { CanRead: true })
             {
                 await _stream.ReadExactlyAsync(lengthBuffer, cancellationToken);
                 var messageLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBuffer);
@@ -124,11 +132,14 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
                 }
             }
-        } catch (Exception e)
+        }
+        catch (Exception e)
         {
             Console.WriteLine(e);
-        } finally{
-            onDisconnected(this);
+        }
+        finally
+        {
+            _engineChannel!.TryWrite(new PeerDisconnected(this));
         }
     }
 
@@ -152,6 +163,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
             if (PeerBitfield[pieceIndex]) return;
             PeerBitfield[pieceIndex] = true;
             Console.WriteLine($"Peer just acquired piece {pieceIndex}.");
+
+            _engineChannel!.TryWrite(new HaveReceived(this, pieceIndex));
         }
         else
         {

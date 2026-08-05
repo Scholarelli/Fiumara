@@ -91,6 +91,14 @@ public class PieceManager
 
     }
 
+    public void RegisterPeerPiece(IPEndPoint endPoint, int pieceIndex)
+    {
+        if (pieceIndex >= 0 && pieceIndex < _pieces.Length)
+        {
+            _pieces[pieceIndex].AvailableOnPeers.Add(endPoint);
+        }
+    }
+
     public void UnregisterPeerPiece(IPEndPoint endPoint, bool[] peerBitField)
     {
         foreach (var peer in _pieces)
