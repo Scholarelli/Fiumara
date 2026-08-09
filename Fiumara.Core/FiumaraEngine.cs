@@ -19,24 +19,38 @@ public class FiumaraEngine
     private readonly ConcurrentQueue<IPEndPoint> _waitingRoom = [];
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
 
-    private async Task ConnectAsync(int newPeersCount)
+    private Task ConnectAsync(int targetCount)
     {
-        var connectionTasks = new List<Task>();
-        for (int i = 0; i < newPeersCount; i++)
+        for (int i = 0; i < targetCount; i++)
         {
-            var endpoint = _waitingRoom.TryDequeue(out var ep) ? ep : null;
-            if (endpoint == null)
+            if (!_waitingRoom.TryDequeue(out var endpoint))
             {
-                Console.WriteLine("Could not get  peer");
+                Console.WriteLine("No more peers available in the waiting room.");
                 break;
-            };
-            var peer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
+            }
 
+            var peer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
             _activePeers.TryAdd(endpoint, peer);
-            connectionTasks.Add(peer.ConnectAsync());
+
+            _ = SafeConnectAsync(peer, endpoint);
         }
 
-        await Task.WhenAll(connectionTasks);
+        return Task.CompletedTask;
+    }
+
+    private async Task SafeConnectAsync(PeerConnection peer, IPEndPoint endpoint)
+    {
+        try
+        {
+            await peer.ConnectAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Peer {endpoint}] Connection failed: {ex.Message}");
+
+            // Let the engine clean up the dead peer and optionally spawn a replacement
+            _eventChannel.Writer.TryWrite(new PeerDisconnected(peer));
+        }
     }
 
     public async Task StartAsync(TorrentInfo torrentInfo)
@@ -45,9 +59,9 @@ public class FiumaraEngine
         _pieceManager = new PieceManager(_torrent);
         var trackerResponse = await _trackerClient.GetPeersAsync(torrentInfo);
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
-
-        await ConnectAsync(5); // Start with one peer for now
         _ = Task.Run(ProcessEventsAsync);
+
+        _ = ConnectAsync(5);
     }
 
     private void HandlePeerDisconnect(PeerConnection deadPeer, IPEndPoint endPoint)
@@ -76,8 +90,12 @@ public class FiumaraEngine
         {
             switch (peerEvent)
             {
+                case ChokeStateChanged c:
+                    await EvaluatePeerAsync(c.Peer);
+                    break;
                 case BitfieldReceived b:
-                    // do somethign
+                    Console.WriteLine("Just got bitfield");
+                    _pieceManager.RegisterPeerPiece(b.Peer.Endpoint, b.Peer.PeerBitfield);
                     break;
                 case HaveReceived h:
                     _pieceManager.RegisterPeerPiece(h.Peer.Endpoint, h.PieceIndex);
@@ -85,7 +103,47 @@ public class FiumaraEngine
                 case PeerDisconnected d:
                     HandlePeerDisconnect(d.Peer, d.Peer.Endpoint);
                     break;
+                case BlockReceived b:
+                    Console.WriteLine("Just got a block omg");
+                    break;
             }
+        }
+    }
+
+    private async Task EvaluatePeerAsync(PeerConnection peer)
+    {
+
+        var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
+
+        var interest = targetPiece != null;
+
+        await peer.SetInterested(interest);
+    }
+
+    private async Task FillPeerPipelineAsync(PeerConnection peer)
+    {
+        if (peer.AmChoked)
+            return;
+
+        int maxPipelineSize = 0;
+
+        while (peer.PendingRequests < maxPipelineSize)
+        {
+            var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
+            if (targetPiece == null) break;
+
+            if(targetPiece.Buffer == null)
+            {
+                int pieceSize = (int)targetPiece.Blocks.Sum(b => b.Size);
+                targetPiece.AllocateBuffer(pieceSize);
+            }
+
+            var block = targetPiece.GetNextMissingBlock();
+            if (block == null) break;
+
+            peer.PendingRequests++;
+            await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
+
         }
     }
 }

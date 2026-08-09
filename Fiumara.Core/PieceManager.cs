@@ -55,6 +55,14 @@ public class Piece
     public bool IsFullyRequested() => Blocks.All(b => b.State != State.Missing);
 
     public int Rarity => AvailableOnPeers.Count;
+
+    public Block? GetNextMissingBlock()
+    {
+        var block = Blocks.FirstOrDefault(b => b.State == State.Missing);
+        if (block != null)
+            block.State = State.Pending;
+        return block;
+    }
 }
 
 public class PieceManager
@@ -81,11 +89,11 @@ public class PieceManager
 
     public void RegisterPeerPiece(IPEndPoint endPoint, bool[] peerBitField)
     {
-        foreach (var peer in _pieces)
+        foreach (var piece in _pieces)
         {
-            if (peerBitField[peer.Index])
+            if (peerBitField[piece.Index])
             {
-                peer.AvailableOnPeers.Add(endPoint);
+                piece.AvailableOnPeers.Add(endPoint);
             }
         }
 
@@ -101,23 +109,26 @@ public class PieceManager
 
     public void UnregisterPeerPiece(IPEndPoint endPoint, bool[] peerBitField)
     {
-        foreach (var peer in _pieces)
+        foreach (var piece in _pieces)
         {
-            if (peerBitField[peer.Index])
-                peer.AvailableOnPeers.Remove(endPoint);
+            if (peerBitField[piece.Index])
+                piece.AvailableOnPeers.Remove(endPoint);
         }
     }
 
     public Piece? GetNextPieceToDownload(IPEndPoint unchokedPeer)
     {
-        foreach (var piece in _pieces)
-        {
-            if (!piece.IsComplete() && piece.AvailableOnPeers.Count > 0)
-            {
+        var candidatePieces = _pieces.Where(p =>
+            !p.IsComplete()&&
+            !p.IsFullyRequested() &&
+            p.AvailableOnPeers.Contains(unchokedPeer));
 
-                return piece;
-            }
-        }
-        return null;
+        var rarestPiece = candidatePieces
+            .OrderBy(p => p.Rarity)
+            .Take(10)
+            .Shuffle()
+            .FirstOrDefault();
+
+        return rarestPiece;
     }
 }

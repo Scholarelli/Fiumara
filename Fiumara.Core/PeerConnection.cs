@@ -15,7 +15,23 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
     private readonly ChannelWriter<PeerEvent>? _engineChannel = engineChannel;
+    public bool AmChoked { get; private set; } = true;
 
+    public bool AmInterested { get; private set; } = false;
+    public int PendingRequests { get; set; } = 0;
+
+    private static readonly byte[] InterestedMessage = [0, 0, 0, 0, 1, 2];
+
+    private static readonly byte[] NotInterestedMessage = [0, 0, 0, 0, 1, 3];
+    private static readonly byte[] KeepAliveMessage = [0, 0, 0, 0, 0, 0];
+    public async Task SetInterested(bool interested)
+    {
+        AmInterested = interested;
+        if (AmInterested)
+            await SendMessageAsync(InterestedMessage);
+        else
+            await SendMessageAsync(NotInterestedMessage);
+    }
 
 
     private enum MessageType : byte
@@ -45,7 +61,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
         await PerformHandshakeAsync(_cts.Token);
 
-
+        Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
         _ = Task.Run(() => ReceiveMessageAsync(_cts.Token), _cts.Token);
     }
 
@@ -126,6 +142,14 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                     case MessageType.Bitfield:
                         ParseBitField(payload);
                         break;
+                    case MessageType.Choke:
+                        AmChoked = true;
+                        _engineChannel!.TryWrite(new ChokeStateChanged(this, AmChoked));
+                        break;
+                    case MessageType.Unchoke:
+                        AmChoked = false;
+                        _engineChannel!.TryWrite(new ChokeStateChanged(this, AmChoked));
+                        break;
                     default:
                         Console.WriteLine($"Received message of type {messageId} with length {messageLength}");
                         break;
@@ -141,6 +165,31 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         {
             _engineChannel!.TryWrite(new PeerDisconnected(this));
         }
+    }
+
+    private async Task SendMessageAsync(ReadOnlyMemory<byte> messageBuffer)
+    {
+        try
+        {
+            await _stream!.WriteAsync(messageBuffer, _cts!.Token);
+        } catch  (Exception e)
+        {
+            Console.WriteLine(e);
+        }
+    }
+
+    public async Task RequestBlockAsync(int pieceIndex, int offset, int size)
+    {
+        var requestMessage = new byte[17];
+        var requestSpan = requestMessage.AsSpan();
+        BinaryPrimitives.WriteUInt32BigEndian(requestSpan[0..4], 13);
+        requestMessage[4] = (byte)MessageType.Request;
+        BinaryPrimitives.WriteInt32BigEndian(requestSpan[5..9], pieceIndex);
+        BinaryPrimitives.WriteInt32BigEndian(requestSpan[9..13], offset);
+        BinaryPrimitives.WriteInt32BigEndian(requestSpan[13..17], size);
+
+        await SendMessageAsync(requestMessage);
+        Console.WriteLine("just Requested a block!");
     }
 
     public void Disconnect()
@@ -192,6 +241,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
             }
         }
 
+
+        _engineChannel!.TryWrite(new BitfieldReceived(this));
     }
 
     public void Dispose()
