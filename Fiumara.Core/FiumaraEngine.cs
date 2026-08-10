@@ -1,9 +1,9 @@
 using System.Collections.Concurrent;
 using System.Net;
-using System.Reflection.Metadata;
 using System.Threading.Channels;
-using BencodeNET.Torrents;
 using Fiumara.Core.Events;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fiumara.Core;
 
@@ -20,13 +20,21 @@ public class FiumaraEngine
     private readonly ConcurrentQueue<IPEndPoint> _waitingRoom = [];
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
 
+    private readonly ILogger<FiumaraEngine> _logger;
+    private readonly ILoggerFactory _loggerFactory;
+    public FiumaraEngine(ILoggerFactory? loggerFactory = null)
+    {
+        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+        _logger = _loggerFactory.CreateLogger<FiumaraEngine>();
+    }
+
     private Task ConnectAsync(int targetCount)
     {
         for (int i = 0; i < targetCount; i++)
         {
             if (!_waitingRoom.TryDequeue(out var endpoint))
             {
-                Console.WriteLine("No more peers available in the waiting room.");
+                _logger.LogInformation("No more peers available in the waiting room.");
                 break;
             }
 
@@ -47,7 +55,8 @@ public class FiumaraEngine
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Peer {endpoint}] Connection failed: {ex.Message}");
+            _logger.LogError("Attempted to connect to peer {Endpoint} but failed: {ErrorMessage}", endpoint, ex.Message);
+            _logger.LogInformation("[Peer {IpEndPoint}] Connection failed: {ExMessage}", endpoint, ex.Message);
 
             // Let the engine clean up the dead peer and optionally spawn a replacement
             _eventChannel.Writer.TryWrite(new PeerDisconnected(peer));
@@ -80,7 +89,7 @@ public class FiumaraEngine
             newPeer.ConnectAsync().ContinueWith(t =>
             {
                 if (!t.IsFaulted) return;
-                Console.Error.WriteLine($"Failed to connect to peer {endpoint}: {t.Exception?.GetBaseException().Message}");
+                _logger.LogError("Failed to connect to peer {Endpoint}: {ErrorMessage}", endpoint, t.Exception?.GetBaseException().Message);
                 HandlePeerDisconnect(newPeer, endPoint);
             });
         }
@@ -93,7 +102,7 @@ public class FiumaraEngine
             switch (peerEvent)
             {
                 case ChokeStateChanged c:
-                    Console.WriteLine($"Choke state changed: {c.Peer.Endpoint}:  {c.Peer.AmChoked}");
+                    _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}",c.Peer.Endpoint, c.Peer.AmChoked? "Chocked" : "Unchoked");
                     if (c.Peer.AmChoked)
                     {
                         foreach (var block in c.Peer.PendingBlocks.Where(block => block.State == State.Pending))
@@ -107,7 +116,6 @@ public class FiumaraEngine
                     await FillPeerPipelineAsync(c.Peer);
                     break;
                 case BitfieldReceived b:
-                    Console.WriteLine("Just got bitfield");
                     _pieceManager.RegisterPeerPiece(b.Peer.Endpoint, b.Peer.PeerBitfield);
                     await EvaluatePeerAsync(b.Peer);
                     break;
@@ -121,15 +129,16 @@ public class FiumaraEngine
                 case BlockReceived b:
                     var piece = _pieceManager.GetPiece(b.PieceIndex);
 
-
                     piece!.SaveBlock(b.Offset, b.Data);
 
                     var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
                     if (pending != null) b.Peer.PendingBlocks.Remove(pending);
+
+                    _logger.LogInformation("[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}", b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
                     if (!piece.IsComplete()) continue;
                     if (piece.VerifyHash())
                     {
-                        Console.WriteLine($"[SUCCESS] Piece {piece.Index} verified! Writing to disk...");
+                        _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...", b.Peer.Endpoint, piece.Index);
                         long writePosition = (long)piece.Index * _torrent.PieceLength;
                         _fileStream.Seek(writePosition, SeekOrigin.Begin);
                         await _fileStream.WriteAsync(piece.Buffer);
@@ -138,13 +147,12 @@ public class FiumaraEngine
                     }
                     else
                     {
-                        Console.Error.WriteLine($"[ERROR] Piece {piece.Index} failed hash check! Trashing data.");
+                        _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.", b.Peer.Endpoint, piece.Index);
                         piece.Reset();
                     }
 
-                    Console.WriteLine($"[Peer {b.Peer.Endpoint}] Just got a block omg");
-                    Console.WriteLine(
-                        $"[Peer {b.Peer.Endpoint}] Received block for piece {b.PieceIndex} at offset {b.Offset}, size {b.Data.Length}");
+                    _logger.LogInformation(
+                        "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}", b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
                     await FillPeerPipelineAsync(b.Peer);
                     break;
             }
@@ -189,9 +197,9 @@ public class FiumaraEngine
 
             }
 
-            Console.WriteLine(
-                $"[Peer {peer.Endpoint}] Requesting block {block}, at offset {block.Offset}, {block.Size}",
-                peer.Endpoint);
+            _logger.LogInformation(
+                "[{Endpoint}][INFO] Requesting block {Block} from piece {Piece}, at offset {Offset}, {Size}",
+                peer.Endpoint, block, targetPiece.Index, block.Offset, block.Size);
 
         }
     }

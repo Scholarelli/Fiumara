@@ -70,10 +70,7 @@ public class Piece
         if (Buffer == null) return;
         System.Buffer.BlockCopy(data, 0, Buffer, offset, data.Length);
         var block = Blocks.FirstOrDefault(b => b.Offset == offset);
-        if (block != null)
-        {
-            block.State = State.Completed;
-        }
+        block?.State = State.Completed;
     }
 
     public bool VerifyHash()
@@ -93,6 +90,8 @@ public class Piece
             block.State = State.Missing;
         }
     }
+
+    public bool isPartial() => Blocks.Any(b => b.State != State.Missing) && !IsFullyRequested();
 }
 
 public class PieceManager
@@ -153,6 +152,12 @@ public class PieceManager
 
     public Piece? GetNextPieceToDownload(IPEndPoint unchokedPeer)
     {
+
+        // Gotta finish what we started man
+        var partialPieces = _pieces
+            .FirstOrDefault(p => p.isPartial() && p.AvailableOnPeers.Contains(unchokedPeer));
+        if(partialPieces != null) return partialPieces;
+
         var candidatePieces = _pieces.Where(p =>
             !p.IsComplete()&&
             !p.IsFullyRequested() &&
