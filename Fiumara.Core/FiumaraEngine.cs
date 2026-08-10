@@ -15,6 +15,7 @@ public class FiumaraEngine
     private static readonly string PeerId = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
     private readonly TrackerClient _trackerClient = new(PeerId);
     private TorrentInfo _torrent;
+    private FileStream _fileStream;
 
     private readonly ConcurrentQueue<IPEndPoint> _waitingRoom = [];
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
@@ -57,6 +58,7 @@ public class FiumaraEngine
     {
         _torrent = torrentInfo;
         _pieceManager = new PieceManager(_torrent);
+        _fileStream = new FileStream("download.txt", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
         var trackerResponse = await _trackerClient.GetPeersAsync(torrentInfo);
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
         _ = Task.Run(ProcessEventsAsync);
@@ -91,20 +93,59 @@ public class FiumaraEngine
             switch (peerEvent)
             {
                 case ChokeStateChanged c:
+                    Console.WriteLine($"Choke state changed: {c.Peer.Endpoint}:  {c.Peer.AmChoked}");
+                    if (c.Peer.AmChoked)
+                    {
+                        foreach (var block in c.Peer.PendingBlocks.Where(block => block.State == State.Pending))
+                        {
+                            block.State = State.Missing;
+                        }
+                        c.Peer.PendingBlocks.Clear();
+                        break;
+                    }
                     await EvaluatePeerAsync(c.Peer);
+                    await FillPeerPipelineAsync(c.Peer);
                     break;
                 case BitfieldReceived b:
                     Console.WriteLine("Just got bitfield");
                     _pieceManager.RegisterPeerPiece(b.Peer.Endpoint, b.Peer.PeerBitfield);
+                    await EvaluatePeerAsync(b.Peer);
                     break;
                 case HaveReceived h:
                     _pieceManager.RegisterPeerPiece(h.Peer.Endpoint, h.PieceIndex);
+                    await EvaluatePeerAsync(h.Peer);
                     break;
                 case PeerDisconnected d:
                     HandlePeerDisconnect(d.Peer, d.Peer.Endpoint);
                     break;
                 case BlockReceived b:
-                    Console.WriteLine("Just got a block omg");
+                    var piece = _pieceManager.GetPiece(b.PieceIndex);
+
+
+                    piece!.SaveBlock(b.Offset, b.Data);
+
+                    var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
+                    if (pending != null) b.Peer.PendingBlocks.Remove(pending);
+                    if (!piece.IsComplete()) continue;
+                    if (piece.VerifyHash())
+                    {
+                        Console.WriteLine($"[SUCCESS] Piece {piece.Index} verified! Writing to disk...");
+                        long writePosition = (long)piece.Index * _torrent.PieceLength;
+                        _fileStream.Seek(writePosition, SeekOrigin.Begin);
+                        await _fileStream.WriteAsync(piece.Buffer);
+
+                        // TODO: Send HAVE Message to all peers!
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"[ERROR] Piece {piece.Index} failed hash check! Trashing data.");
+                        piece.Reset();
+                    }
+
+                    Console.WriteLine($"[Peer {b.Peer.Endpoint}] Just got a block omg");
+                    Console.WriteLine(
+                        $"[Peer {b.Peer.Endpoint}] Received block for piece {b.PieceIndex} at offset {b.Offset}, size {b.Data.Length}");
+                    await FillPeerPipelineAsync(b.Peer);
                     break;
             }
         }
@@ -114,7 +155,6 @@ public class FiumaraEngine
     {
 
         var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
-
         var interest = targetPiece != null;
 
         await peer.SetInterested(interest);
@@ -125,9 +165,9 @@ public class FiumaraEngine
         if (peer.AmChoked)
             return;
 
-        int maxPipelineSize = 0;
+        int maxPipelineSize = 3;
 
-        while (peer.PendingRequests < maxPipelineSize)
+        while (peer.PendingBlocks.Count < maxPipelineSize)
         {
             var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
             if (targetPiece == null) break;
@@ -140,9 +180,18 @@ public class FiumaraEngine
 
             var block = targetPiece.GetNextMissingBlock();
             if (block == null) break;
+            else
+            {
+                peer.PendingBlocks.Add(block);
 
-            peer.PendingRequests++;
-            await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
+
+                await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
+
+            }
+
+            Console.WriteLine(
+                $"[Peer {peer.Endpoint}] Requesting block {block}, at offset {block.Offset}, {block.Size}",
+                peer.Endpoint);
 
         }
     }

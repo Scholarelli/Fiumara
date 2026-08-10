@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using BencodeNET.Torrents;
 
 namespace Fiumara.Core;
@@ -10,6 +11,7 @@ public class Block
     public uint Offset { get; set; }
     public uint Size { get; set; }
     public State State { get; set; } = State.Missing;
+
 }
 
 public enum PieceState
@@ -48,7 +50,7 @@ public class Piece
 
     public void AllocateBuffer(int pieceSize)
     {
-        Buffer = new  byte[pieceSize];
+        Buffer ??= new  byte[pieceSize];
     }
 
     public bool IsComplete() => Blocks.All(b => b.State == State.Completed);
@@ -59,9 +61,37 @@ public class Piece
     public Block? GetNextMissingBlock()
     {
         var block = Blocks.FirstOrDefault(b => b.State == State.Missing);
-        if (block != null)
-            block.State = State.Pending;
+        block?.State = State.Pending;
         return block;
+    }
+
+    public void SaveBlock(int offset, byte[] data)
+    {
+        if (Buffer == null) return;
+        System.Buffer.BlockCopy(data, 0, Buffer, offset, data.Length);
+        var block = Blocks.FirstOrDefault(b => b.Offset == offset);
+        if (block != null)
+        {
+            block.State = State.Completed;
+        }
+    }
+
+    public bool VerifyHash()
+    {
+        if (Buffer == null)
+            return false;
+
+        byte[] actualHash = SHA1.HashData(Buffer);
+
+        return actualHash.SequenceEqual(ExpectedHash);
+    }
+
+    public void Reset()
+    {
+        foreach (var block in Blocks)
+        {
+            block.State = State.Missing;
+        }
     }
 }
 
@@ -114,6 +144,11 @@ public class PieceManager
             if (peerBitField[piece.Index])
                 piece.AvailableOnPeers.Remove(endPoint);
         }
+    }
+
+    public Piece? GetPiece(int index)
+    {
+        return _pieces[index];
     }
 
     public Piece? GetNextPieceToDownload(IPEndPoint unchokedPeer)

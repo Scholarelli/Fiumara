@@ -18,14 +18,17 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     public bool AmChoked { get; private set; } = true;
 
     public bool AmInterested { get; private set; } = false;
-    public int PendingRequests { get; set; } = 0;
+    public List<Block> PendingBlocks { get; } = [];
 
-    private static readonly byte[] InterestedMessage = [0, 0, 0, 0, 1, 2];
+    private static readonly byte[] InterestedMessage = [0, 0, 0, 1, 2];
 
-    private static readonly byte[] NotInterestedMessage = [0, 0, 0, 0, 1, 3];
-    private static readonly byte[] KeepAliveMessage = [0, 0, 0, 0, 0, 0];
+    private static readonly byte[] NotInterestedMessage = [0, 0, 0, 1, 3];
+    private static readonly byte[] KeepAliveMessage = [0, 0, 0, 0];
     public async Task SetInterested(bool interested)
     {
+        if (AmInterested == interested)
+            return;
+
         AmInterested = interested;
         if (AmInterested)
             await SendMessageAsync(InterestedMessage);
@@ -150,12 +153,26 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                         AmChoked = false;
                         _engineChannel!.TryWrite(new ChokeStateChanged(this, AmChoked));
                         break;
+                    case MessageType.Piece:
+                        var index = BinaryPrimitives.ReadInt32BigEndian(payload[0..4]);
+                        var offset = BinaryPrimitives.ReadInt32BigEndian(payload[4..8]);
+                        payload = payload[8..];
+                        _engineChannel!.TryWrite(new BlockReceived(this, index, offset, payload.ToArray()));
+                        break;
                     default:
                         Console.WriteLine($"Received message of type {messageId} with length {messageLength}");
                         break;
 
                 }
             }
+        }
+        catch (EndOfStreamException)
+        {
+            Console.WriteLine($"[Peer disconnected] {endpoint.Address}:{endpoint.Port} closed the stream");
+        }
+        catch (IOException e)
+        {
+            Console.WriteLine($"[Peer Dropped] {Endpoint} connection lost: {e.Message}");
         }
         catch (Exception e)
         {
@@ -188,8 +205,9 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         BinaryPrimitives.WriteInt32BigEndian(requestSpan[9..13], offset);
         BinaryPrimitives.WriteInt32BigEndian(requestSpan[13..17], size);
 
-        await SendMessageAsync(requestMessage);
         Console.WriteLine("just Requested a block!");
+
+        await SendMessageAsync(requestMessage);
     }
 
     public void Disconnect()
