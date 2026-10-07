@@ -22,6 +22,7 @@ public class FiumaraEngine
 
     private readonly ILogger<FiumaraEngine> _logger;
     private Task? _eventLoop;
+
     public Task Completion => _eventLoop
                               ?? throw new InvalidOperationException("FiumaraEngine has not been initialized.");
 
@@ -58,7 +59,8 @@ public class FiumaraEngine
         }
         catch (Exception ex)
         {
-            _logger.LogError("Attempted to connect to peer {Endpoint} but failed: {ErrorMessage}", endpoint, ex.Message);
+            _logger.LogError("Attempted to connect to peer {Endpoint} but failed: {ErrorMessage}", endpoint,
+                ex.Message);
 
             // Let the engine clean up the dead peer and optionally spawn a replacement
             _eventChannel.Writer.TryWrite(new PeerDisconnected(peer));
@@ -102,6 +104,45 @@ public class FiumaraEngine
         _ = ConnectAsync(1);
     }
 
+    private async Task HandleBlockReceived(BlockReceived b)
+    {
+        var piece = _pieceManager.GetPiece(b.PieceIndex);
+
+        piece!.SaveBlock(b.Offset, b.Data);
+
+        var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
+        if (pending != null) b.Peer.PendingBlocks.Remove(pending);
+
+        _logger.LogInformation(
+            "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}",
+            b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
+        if (!piece.IsComplete()) return;
+        if (piece.VerifyHash())
+        {
+            _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...",
+                b.Peer.Endpoint, piece.Index);
+            long writePosition = (long)piece.Index * _torrent.PieceLength;
+            _fileStream.Seek(writePosition, SeekOrigin.Begin);
+            await _fileStream.WriteAsync(piece.Buffer);
+
+            foreach (var peer in _activePeers.Values)
+            {
+                if (peer.PeerBitfield[piece.Index]) continue;
+                await peer.SendHaveAsync(piece.Index);
+                _logger.LogInformation(
+                    "[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}",
+                    b.Peer.Endpoint, piece.Index, peer.Endpoint);
+            }
+        }
+        else
+        {
+            _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.",
+                b.Peer.Endpoint, piece.Index);
+            piece.Reset();
+        }
+    }
+
+
     private async Task ProcessEventsAsync()
     {
         await foreach (var peerEvent in _eventChannel.Reader.ReadAllAsync())
@@ -109,16 +150,19 @@ public class FiumaraEngine
             switch (peerEvent)
             {
                 case ChokeStateChanged c:
-                    _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}",c.Peer.Endpoint, c.Peer.AmChoked? "Chocked" : "Unchoked");
+                    _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}", c.Peer.Endpoint,
+                        c.Peer.AmChoked ? "Chocked" : "Unchoked");
                     if (c.Peer.AmChoked)
                     {
                         foreach (var block in c.Peer.PendingBlocks.Where(block => block.State == State.Pending))
                         {
                             block.State = State.Missing;
                         }
+
                         c.Peer.PendingBlocks.Clear();
                         break;
                     }
+
                     await EvaluatePeerAsync(c.Peer);
                     await FillPeerPipelineAsync(c.Peer);
                     break;
@@ -134,46 +178,17 @@ public class FiumaraEngine
                     HandlePeerDisconnect(d.Peer, d.Peer.Endpoint);
                     break;
                 case BlockReceived b:
-                    var piece = _pieceManager.GetPiece(b.PieceIndex);
-
-                    piece!.SaveBlock(b.Offset, b.Data);
-
-                    var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
-                    if (pending != null) b.Peer.PendingBlocks.Remove(pending);
-
-                    _logger.LogInformation("[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}", b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
-                    if (!piece.IsComplete()) continue;
-                    if (piece.VerifyHash())
-                    {
-                        _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...", b.Peer.Endpoint, piece.Index);
-                        long writePosition = (long)piece.Index * _torrent.PieceLength;
-                        _fileStream.Seek(writePosition, SeekOrigin.Begin);
-                        await _fileStream.WriteAsync(piece.Buffer);
-
-                        foreach (var peer in _activePeers.Values)
-                        {
-                            if(peer.PeerBitfield[piece.Index]) continue;
-                            await peer.SendHaveAsync(piece.Index);
-                            _logger.LogInformation("[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}", b.Peer.Endpoint, piece.Index, peer.Endpoint);
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.", b.Peer.Endpoint, piece.Index);
-                        piece.Reset();
-                    }
-
-                    _logger.LogInformation(
-                        "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}", b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
+                    await HandleBlockReceived(b);
                     await FillPeerPipelineAsync(b.Peer);
+
                     break;
             }
         }
     }
 
+
     private async Task EvaluatePeerAsync(PeerConnection peer)
     {
-
         var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
         var interest = targetPiece != null;
 
@@ -192,7 +207,7 @@ public class FiumaraEngine
             var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
             if (targetPiece == null) break;
 
-            if(targetPiece.Buffer == null)
+            if (targetPiece.Buffer == null)
             {
                 int pieceSize = (int)targetPiece.Blocks.Sum(b => b.Size);
                 targetPiece.AllocateBuffer(pieceSize);
@@ -206,13 +221,11 @@ public class FiumaraEngine
 
 
                 await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
-
             }
 
             _logger.LogInformation(
                 "[{Endpoint}][INFO] Requesting block {Block} from piece {Piece}, at offset {Offset}, {Size}",
                 peer.Endpoint, block, targetPiece.Index, block.Offset, block.Size);
-
         }
     }
 }
