@@ -40,7 +40,8 @@ public class FiumaraEngine
                 break;
             }
 
-            var peer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
+            var peer = new PeerConnection(endpoint, [.. _torrent.InfoHash], PeerId, _eventChannel.Writer,
+                (int)Math.Ceiling((double)_torrent.TotalSize / _torrent.PieceLength));
             _activePeers.TryAdd(endpoint, peer);
 
             _ = SafeConnectAsync(peer, endpoint);
@@ -86,7 +87,7 @@ public class FiumaraEngine
         }
         catch (Exception ex)
         {
-            _logger.LogError("Event loop crashed: {ex}", ex);
+            _logger.LogError(ex, "Event loop crashed");
             throw;
         }
     }

@@ -1,14 +1,13 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
-using System.Numerics;
 using System.Text;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
 
 namespace Fiumara.Core;
 
-public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<PeerEvent> engineChannel) : IDisposable
+public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<PeerEvent> engineChannel, int piecesCount) : IDisposable
 {
     public IPEndPoint Endpoint => endpoint;
     private TcpClient? _tcpClient;
@@ -51,7 +50,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         Piece = 7,
         Cancel = 8
     }
-    public bool[] PeerBitfield { get; private set; } = [];
+    public bool[] PeerBitfield { get; private set; } = new bool[piecesCount];
 
     public async Task ConnectAsync(CancellationToken externalToken = default)
     {
@@ -268,23 +267,35 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
     private void ParseBitField(ReadOnlySpan<byte> payload)
     {
-        PeerBitfield = new bool[payload.Length * 8];
+        // One bit per piece, rounded up to whole bytes: (n + 7) / 8 is an integer ceiling division
+        int expectedLength = (PeerBitfield.Length + 7) / 8;
+        if (payload.Length != expectedLength)
+        {
+            Console.WriteLine($"Peer sent a Bitfield of {payload.Length} bytes, expected {expectedLength}. Disconnecting.");
+            Disconnect();
+            return;
+        }
 
-        int piecesAvailable = 0;
+        // As to protocol, the bits after the last piece are padding and must be zero
+        int spareBits = expectedLength * 8 - PeerBitfield.Length;
+        if (spareBits > 0 && (payload[^1] & ((1 << spareBits) - 1)) != 0)
+        {
+            Console.WriteLine("Peer sent a Bitfield with spare bits set. Disconnecting.");
+            Disconnect();
+            return;
+        }
+
         for (int i = 0; i < payload.Length; i++)
         {
             byte b = payload[i];
-
-            piecesAvailable = BitOperations.PopCount(b);
-
             int baseIndex = i * 8;
-            for(int bit = 0; bit < 8; bit++) {
-                // We gotta adapt to big endian
+            for (int bit = 0; bit < 8; bit++)
+            {
+                if (baseIndex + bit >= PeerBitfield.Length) break;
+                // The most significant bit of each byte is the lowest piece index
                 PeerBitfield[baseIndex + bit] = (b & (1 << (7 - bit))) != 0;
-
             }
         }
-
 
         _engineChannel!.TryWrite(new BitfieldReceived(this));
     }
