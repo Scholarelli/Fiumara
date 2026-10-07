@@ -16,8 +16,10 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     private CancellationTokenSource? _cts;
     private readonly ChannelWriter<PeerEvent>? _engineChannel = engineChannel;
     public bool AmChoked { get; private set; } = true;
+    public bool AmChoking { get; private set; } = true;
 
     public bool AmInterested { get; private set; } = false;
+    public bool IsInterested {get; private set;} = false;
     public List<Block> PendingBlocks { get; } = [];
 
     private static readonly byte[] InterestedMessage = [0, 0, 0, 1, 2];
@@ -129,8 +131,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                 await _stream.ReadExactlyAsync(lengthBuffer, cancellationToken);
                 var messageLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBuffer);
 
-                if (messageLength == 0) continue;
 
+                if (messageLength == 0) continue;
                 var messageBuffer = new byte[messageLength];
                 await _stream.ReadExactlyAsync(messageBuffer, cancellationToken);
 
@@ -158,6 +160,20 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                         var offset = BinaryPrimitives.ReadInt32BigEndian(payload[4..8]);
                         payload = payload[8..];
                         _engineChannel!.TryWrite(new BlockReceived(this, index, offset, payload.ToArray()));
+                        break;
+                    case MessageType.Interested:
+                        IsInterested = true;
+                        _engineChannel!.TryWrite(new InterestedStateChanged(this, IsInterested));
+                        break;
+                    case MessageType.NotInterested:
+                        IsInterested = false;
+                        _engineChannel!.TryWrite(new InterestedStateChanged(this, IsInterested));
+                        break;
+                    case MessageType.Request:
+                        index = BinaryPrimitives.ReadInt32BigEndian(payload[0..4]);
+                        offset = BinaryPrimitives.ReadInt32BigEndian(payload[4..8]);
+                        payload = payload[8..];
+                        ParseRequest(payload);
                         break;
                     default:
                         Console.WriteLine($"Received message of type {messageId} with length {messageLength}");
@@ -193,6 +209,16 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         {
             Console.WriteLine(e);
         }
+    }
+
+    public async Task SendHaveAsync(int pieceIndex)
+    {
+        var haveMessage = new byte[9];
+        var haveSpan = haveMessage.AsSpan();
+        BinaryPrimitives.WriteUInt32BigEndian(haveSpan[..4], 5);
+        haveMessage[4] = (byte)MessageType.Have;
+        BinaryPrimitives.WriteInt32BigEndian(haveSpan[5..9], pieceIndex);
+        await SendMessageAsync(haveMessage);
     }
 
     public async Task RequestBlockAsync(int pieceIndex, int offset, int size)
@@ -261,6 +287,11 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
 
         _engineChannel!.TryWrite(new BitfieldReceived(this));
+    }
+
+    private void ParseRequest(ReadOnlySpan<byte> payload)
+    {
+
     }
 
     public void Dispose()

@@ -21,11 +21,13 @@ public class FiumaraEngine
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
 
     private readonly ILogger<FiumaraEngine> _logger;
-    private readonly ILoggerFactory _loggerFactory;
+    private Task? _eventLoop;
+    public Task Completion => _eventLoop
+                              ?? throw new InvalidOperationException("FiumaraEngine has not been initialized.");
+
     public FiumaraEngine(ILoggerFactory? loggerFactory = null)
     {
-        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
-        _logger = _loggerFactory.CreateLogger<FiumaraEngine>();
+        _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<FiumaraEngine>();
     }
 
     private Task ConnectAsync(int targetCount)
@@ -56,7 +58,6 @@ public class FiumaraEngine
         catch (Exception ex)
         {
             _logger.LogError("Attempted to connect to peer {Endpoint} but failed: {ErrorMessage}", endpoint, ex.Message);
-            _logger.LogInformation("[Peer {IpEndPoint}] Connection failed: {ExMessage}", endpoint, ex.Message);
 
             // Let the engine clean up the dead peer and optionally spawn a replacement
             _eventChannel.Writer.TryWrite(new PeerDisconnected(peer));
@@ -70,29 +71,34 @@ public class FiumaraEngine
         _fileStream = new FileStream("download.txt", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
         var trackerResponse = await _trackerClient.GetPeersAsync(torrentInfo);
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
-        _ = Task.Run(ProcessEventsAsync);
 
-        _ = ConnectAsync(5);
+        _eventLoop = Task.Run(RunEventLoopAsync);
+
+
+        _ = ConnectAsync(15);
+    }
+
+    private async Task RunEventLoopAsync()
+    {
+        try
+        {
+            await ProcessEventsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Event loop crashed: {ex}", ex);
+            throw;
+        }
     }
 
     private void HandlePeerDisconnect(PeerConnection deadPeer, IPEndPoint endPoint)
     {
         deadPeer.Dispose();
+        _pieceManager.UnregisterPeerPiece(endPoint, deadPeer.PeerBitfield);
         _activePeers.TryRemove(endPoint, out var _);
 
-        if (_waitingRoom.Count > 0)
-        {
-            var endpoint = _waitingRoom.TryDequeue(out var ep) ? ep : null;
-            if (endpoint == null) return;
-            var newPeer = new PeerConnection(endpoint, _torrent.InfoHash.ToArray(), PeerId, _eventChannel.Writer);
-            _activePeers.TryAdd(endpoint, newPeer);
-            newPeer.ConnectAsync().ContinueWith(t =>
-            {
-                if (!t.IsFaulted) return;
-                _logger.LogError("Failed to connect to peer {Endpoint}: {ErrorMessage}", endpoint, t.Exception?.GetBaseException().Message);
-                HandlePeerDisconnect(newPeer, endPoint);
-            });
-        }
+        if (_waitingRoom.IsEmpty) return;
+        _ = ConnectAsync(1);
     }
 
     private async Task ProcessEventsAsync()
@@ -143,7 +149,12 @@ public class FiumaraEngine
                         _fileStream.Seek(writePosition, SeekOrigin.Begin);
                         await _fileStream.WriteAsync(piece.Buffer);
 
-                        // TODO: Send HAVE Message to all peers!
+                        foreach (var peer in _activePeers.Values)
+                        {
+                            if(peer.PeerBitfield[piece.Index]) continue;
+                            await peer.SendHaveAsync(piece.Index);
+                            _logger.LogInformation("[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}", b.Peer.Endpoint, piece.Index, peer.Endpoint);
+                        }
                     }
                     else
                     {
