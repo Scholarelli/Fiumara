@@ -113,7 +113,7 @@ public class FiumaraEngine
         var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
         if (pending != null) b.Peer.PendingBlocks.Remove(pending);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}",
             b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
         if (!piece.IsComplete()) return;
@@ -129,7 +129,7 @@ public class FiumaraEngine
             {
                 if (peer.PeerBitfield[piece.Index]) continue;
                 await peer.SendHaveAsync(piece.Index);
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}",
                     b.Peer.Endpoint, piece.Index, peer.Endpoint);
             }
@@ -152,7 +152,7 @@ public class FiumaraEngine
                 case ChokeStateChanged c:
                     _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}", c.Peer.Endpoint,
                         c.Peer.AmChoked ? "Chocked" : "Unchoked");
-                    if (c.Peer.AmChoked)
+                    if (c.IsChoked)
                     {
                         foreach (var block in c.Peer.PendingBlocks.Where(block => block.State == State.Pending))
                         {
@@ -223,7 +223,7 @@ public class FiumaraEngine
                 await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
             }
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "[{Endpoint}][INFO] Requesting block {Block} from piece {Piece}, at offset {Offset}, {Size}",
                 peer.Endpoint, block, targetPiece.Index, block.Offset, block.Size);
         }

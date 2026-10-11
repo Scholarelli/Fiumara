@@ -230,8 +230,6 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         BinaryPrimitives.WriteInt32BigEndian(requestSpan[9..13], offset);
         BinaryPrimitives.WriteInt32BigEndian(requestSpan[13..17], size);
 
-        Console.WriteLine(" just Requested a block!");
-
         await SendMessageAsync(requestMessage);
     }
 
