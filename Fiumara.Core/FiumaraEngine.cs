@@ -13,7 +13,7 @@ public class FiumaraEngine
     private PieceManager _pieceManager;
 
     private static readonly string PeerId = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
-    private readonly TrackerClient _trackerClient = new(PeerId);
+    private readonly TrackerClient _trackerClient;
     private TorrentInfo _torrent;
     private FileStream _fileStream;
 
@@ -21,14 +21,21 @@ public class FiumaraEngine
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
 
     private readonly ILogger<FiumaraEngine> _logger;
+    private readonly FiumaraOptions _options;
+    private readonly TimeProvider _timeProvider;
     private Task? _eventLoop;
 
     public Task Completion => _eventLoop
                               ?? throw new InvalidOperationException("FiumaraEngine has not been initialized.");
 
-    public FiumaraEngine(ILoggerFactory? loggerFactory = null)
+    public FiumaraEngine(ILoggerFactory? loggerFactory = null, FiumaraOptions? options = null,
+        TimeProvider? timeProvider = null)
     {
         _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<FiumaraEngine>();
+        _options = options ?? FiumaraOptions.Default;
+        _options.Validate();
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _trackerClient = new TrackerClient(PeerId, _options.ListenPort);
     }
 
     private Task ConnectAsync(int targetCount)
@@ -55,7 +62,7 @@ public class FiumaraEngine
     {
         try
         {
-            await peer.ConnectAsync();
+            await peer.ConnectAsync(_options.HandshakeTimeout);
         }
         catch (Exception ex)
         {
@@ -70,15 +77,15 @@ public class FiumaraEngine
     public async Task StartAsync(TorrentInfo torrentInfo)
     {
         _torrent = torrentInfo;
-        _pieceManager = new PieceManager(_torrent);
-        _fileStream = new FileStream("download.txt", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+        _pieceManager = new PieceManager(_torrent, new RequestsRegister(_options.RequestTimeout, _timeProvider));
+        _fileStream = new FileStream(_options.DownloadPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
         var trackerResponse = await _trackerClient.GetPeersAsync(torrentInfo);
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
 
         _eventLoop = Task.Run(RunEventLoopAsync);
 
 
-        _ = ConnectAsync(15);
+        _ = ConnectAsync(_options.MaxPeers);
     }
 
     private async Task RunEventLoopAsync()
@@ -198,7 +205,7 @@ public class FiumaraEngine
         if (peer.AmChoked)
             return;
 
-        int maxPipelineSize = 3;
+        int maxPipelineSize = _options.MaxPipelineSize;
 
         while (_pieceManager.CountPendingRequests(peer) < maxPipelineSize)
         {

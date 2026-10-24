@@ -51,7 +51,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     }
     public bool[] PeerBitfield { get; private set; } = new bool[piecesCount];
 
-    public async Task ConnectAsync(CancellationToken externalToken = default)
+    public async Task ConnectAsync(TimeSpan handshakeTimeout, CancellationToken externalToken = default)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
 
@@ -62,7 +62,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
         _stream = _tcpClient.GetStream();
 
-        await PerformHandshakeAsync(_cts.Token);
+        await PerformHandshakeAsync(handshakeTimeout, _cts.Token);
 
         Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
         _ = Task.Run(() => ReceiveMessageAsync(_cts.Token), _cts.Token);
@@ -85,10 +85,10 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         return handshake;
     }
 
-    private async Task PerformHandshakeAsync(CancellationToken cancellationToken)
+    private async Task PerformHandshakeAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
+        handshakeCts.CancelAfter(timeout);
 
         var handshakeMessage = CreateHandshakeMessage();
         await _stream!.WriteAsync(handshakeMessage, handshakeCts.Token);
