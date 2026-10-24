@@ -4,7 +4,7 @@ using BencodeNET.Torrents;
 
 namespace Fiumara.Core;
 
-public enum State {Missing, Pending, Completed}
+public enum State {Missing, Completed}
 
 public class Block
 {
@@ -20,6 +20,17 @@ public enum PieceState
     Pending,
     Completed
 };
+
+public readonly record struct BlockRequest(int PieceIndex, int Offset, int Length);
+
+public enum BlockOutcome
+{
+    Rejected,       // invalid piece index, offset or length: the peer is misbehaving
+    Duplicate,      // the block was already completed
+    Stored,         // saved, but the piece is not complete yet
+    PieceVerified,  // the piece is complete and its hash matches
+    PieceCorrupted  // the piece is complete but its hash is wrong: its blocks are missing again
+}
 
 public class Piece
 {
@@ -48,22 +59,14 @@ public class Piece
         }
     }
 
-    public void AllocateBuffer(int pieceSize)
+    public void AllocateBuffer()
     {
-        Buffer ??= new  byte[pieceSize];
+        Buffer ??= new byte[(int)Blocks.Sum(b => b.Size)];
     }
 
     public bool IsComplete() => Blocks.All(b => b.State == State.Completed);
-    public bool IsFullyRequested() => Blocks.All(b => b.State != State.Missing);
 
     public int Rarity => AvailableOnPeers.Count;
-
-    public Block? GetNextMissingBlock()
-    {
-        var block = Blocks.FirstOrDefault(b => b.State == State.Missing);
-        block?.State = State.Pending;
-        return block;
-    }
 
     public void SaveBlock(int offset, byte[] data)
     {
@@ -90,16 +93,17 @@ public class Piece
             block.State = State.Missing;
         }
     }
-
-    public bool isPartial() => Blocks.Any(b => b.State != State.Missing) && !IsFullyRequested();
 }
 
 public class PieceManager
 {
     private readonly Piece[] _pieces;
+    private readonly RequestsRegister _requests;
 
-    public PieceManager(TorrentInfo torrent)
+    public PieceManager(TorrentInfo torrent, RequestsRegister? requests = null)
     {
+        _requests = requests ?? new RequestsRegister();
+
         int totalPieces = (int)Math.Ceiling((double)torrent.TotalSize / torrent.PieceLength);
         _pieces = new Piece[totalPieces];
 
@@ -145,7 +149,7 @@ public class PieceManager
         }
     }
 
-    public Piece? GetPiece(int index)
+    public Piece GetPiece(int index)
     {
         return _pieces[index];
     }
@@ -155,13 +159,14 @@ public class PieceManager
 
         // Gotta finish what we started man
         var partialPieces = _pieces
-            .FirstOrDefault(p => p.isPartial() && p.AvailableOnPeers.Contains(unchokedPeer));
+            .FirstOrDefault(p => IsPartial(p) && p.AvailableOnPeers.Contains(unchokedPeer));
         if(partialPieces != null) return partialPieces;
 
         var candidatePieces = _pieces.Where(p =>
-            !p.IsComplete()&&
-            !p.IsFullyRequested() &&
+            !p.IsComplete() &&
+            !IsFullyRequested(p) &&
             p.AvailableOnPeers.Contains(unchokedPeer));
+
 
         var rarestPiece = candidatePieces
             .OrderBy(p => p.Rarity)
@@ -171,4 +176,57 @@ public class PieceManager
 
         return rarestPiece;
     }
+
+    public int CountPendingRequests(PeerConnection peerConnection) =>
+        _requests.CountPeerPending(peerConnection);
+
+    // Choosing the block and registering the request is a single atomic unit
+    public BlockRequest? ReserveNextBlock(PeerConnection peerConnection)
+    {
+        var piece = GetNextPieceToDownload(peerConnection.Endpoint);
+        if (piece == null) return null;
+
+        var block = NextFreeBlock(piece);
+        if (block == null) return null;
+
+        if (!_requests.TryAdd(block, peerConnection))
+            throw new InvalidOperationException(
+                $"Block at offset {block.Offset} of piece {piece.Index} was chosen while already requested.");
+
+        piece.AllocateBuffer();
+        return new BlockRequest(piece.Index, (int)block.Offset, (int)block.Size);
+    }
+
+    public BlockOutcome OnBlockReceived(int pieceIndex, int offset, byte[] data)
+    {
+        if (pieceIndex < 0 || pieceIndex >= _pieces.Length) return BlockOutcome.Rejected;
+
+        var piece = _pieces[pieceIndex];
+        var block = piece.Blocks.FirstOrDefault(b => b.Offset == offset);
+        if (block == null || data.Length != block.Size) return BlockOutcome.Rejected;
+
+        // Closes the request whoever it was assigned to: a late answer carries good data too
+        _requests.TryRemove(block, out _);
+        if (block.State == State.Completed) return BlockOutcome.Duplicate;
+
+        piece.AllocateBuffer();
+        piece.SaveBlock(offset, data);
+        if (!piece.IsComplete()) return BlockOutcome.Stored;
+        if (piece.VerifyHash()) return BlockOutcome.PieceVerified;
+
+        piece.Reset();
+        return BlockOutcome.PieceCorrupted;
+    }
+
+    public IReadOnlyList<Block> ReleasePeerRequests(PeerConnection peerConnection) =>
+        _requests.RemovePeerPending(peerConnection);
+
+    private bool IsFullyRequested(Piece piece) =>
+        piece.Blocks.All(b => b.State == State.Completed || _requests.IsPending(b));
+
+    private bool IsPartial(Piece piece) =>
+        piece.Blocks.Any(b => b.State == State.Completed || _requests.IsPending(b)) && !IsFullyRequested(piece);
+
+    private Block? NextFreeBlock(Piece piece) =>
+        piece.Blocks.FirstOrDefault(b => b.State == State.Missing && !_requests.IsPending(b));
 }

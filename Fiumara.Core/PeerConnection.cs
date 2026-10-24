@@ -19,7 +19,6 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
     public bool AmInterested { get; private set; } = false;
     public bool IsInterested {get; private set;} = false;
-    public List<Block> PendingBlocks { get; } = [];
 
     private static readonly byte[] InterestedMessage = [0, 0, 0, 1, 2];
 

@@ -97,6 +97,7 @@ public class FiumaraEngine
     private void HandlePeerDisconnect(PeerConnection deadPeer, IPEndPoint endPoint)
     {
         deadPeer.Dispose();
+        _pieceManager.ReleasePeerRequests(deadPeer);
         _pieceManager.UnregisterPeerPiece(endPoint, deadPeer.PeerBitfield);
         _activePeers.TryRemove(endPoint, out var _);
 
@@ -106,39 +107,41 @@ public class FiumaraEngine
 
     private async Task HandleBlockReceived(BlockReceived b)
     {
-        var piece = _pieceManager.GetPiece(b.PieceIndex);
-
-        piece!.SaveBlock(b.Offset, b.Data);
-
-        var pending = b.Peer.PendingBlocks.FirstOrDefault(x => x.Offset == b.Offset);
-        if (pending != null) b.Peer.PendingBlocks.Remove(pending);
+        var outcome = _pieceManager.OnBlockReceived(b.PieceIndex, b.Offset, b.Data);
 
         _logger.LogDebug(
-            "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}",
-            b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
-        if (!piece.IsComplete()) return;
-        if (piece.VerifyHash())
-        {
-            _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...",
-                b.Peer.Endpoint, piece.Index);
-            long writePosition = (long)piece.Index * _torrent.PieceLength;
-            _fileStream.Seek(writePosition, SeekOrigin.Begin);
-            await _fileStream.WriteAsync(piece.Buffer);
+            "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}: {Outcome}",
+            b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length, outcome);
 
-            foreach (var peer in _activePeers.Values)
-            {
-                if (peer.PeerBitfield[piece.Index]) continue;
-                await peer.SendHaveAsync(piece.Index);
-                _logger.LogDebug(
-                    "[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}",
-                    b.Peer.Endpoint, piece.Index, peer.Endpoint);
-            }
-        }
-        else
+        switch (outcome)
         {
-            _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.",
-                b.Peer.Endpoint, piece.Index);
-            piece.Reset();
+            case BlockOutcome.PieceVerified:
+                var piece = _pieceManager.GetPiece(b.PieceIndex);
+                _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...",
+                    b.Peer.Endpoint, piece.Index);
+                long writePosition = piece.Index * _torrent.PieceLength;
+                _fileStream.Seek(writePosition, SeekOrigin.Begin);
+                await _fileStream.WriteAsync(piece.Buffer);
+
+                foreach (var peer in _activePeers.Values)
+                {
+                    if (peer.PeerBitfield[piece.Index]) continue;
+                    await peer.SendHaveAsync(piece.Index);
+                    _logger.LogDebug(
+                        "[{Endpoint}][INFO] Sent HAVE message for piece {PieceIndex} to peer {PeerEndpoint}",
+                        b.Peer.Endpoint, piece.Index, peer.Endpoint);
+                }
+                break;
+            case BlockOutcome.PieceCorrupted:
+                _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.",
+                    b.Peer.Endpoint, b.PieceIndex);
+                break;
+            case BlockOutcome.Rejected:
+                _logger.LogWarning(
+                    "[{Endpoint}][WARN] Invalid block (piece {PieceIndex}, offset {Offset}, size {DataLength}). Disconnecting.",
+                    b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
+                b.Peer.Disconnect();
+                break;
         }
     }
 
@@ -151,15 +154,10 @@ public class FiumaraEngine
             {
                 case ChokeStateChanged c:
                     _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}", c.Peer.Endpoint,
-                        c.Peer.AmChoked ? "Chocked" : "Unchoked");
+                        c.IsChoked ? "Choked" : "Unchoked");
                     if (c.IsChoked)
                     {
-                        foreach (var block in c.Peer.PendingBlocks.Where(block => block.State == State.Pending))
-                        {
-                            block.State = State.Missing;
-                        }
-
-                        c.Peer.PendingBlocks.Clear();
+                        _pieceManager.ReleasePeerRequests(c.Peer);
                         break;
                     }
 
@@ -202,30 +200,15 @@ public class FiumaraEngine
 
         int maxPipelineSize = 3;
 
-        while (peer.PendingBlocks.Count < maxPipelineSize)
+        while (_pieceManager.CountPendingRequests(peer) < maxPipelineSize)
         {
-            var targetPiece = _pieceManager.GetNextPieceToDownload(peer.Endpoint);
-            if (targetPiece == null) break;
+            if (_pieceManager.ReserveNextBlock(peer) is not { } request) break;
 
-            if (targetPiece.Buffer == null)
-            {
-                int pieceSize = (int)targetPiece.Blocks.Sum(b => b.Size);
-                targetPiece.AllocateBuffer(pieceSize);
-            }
-
-            var block = targetPiece.GetNextMissingBlock();
-            if (block == null) break;
-            else
-            {
-                peer.PendingBlocks.Add(block);
-
-
-                await peer.RequestBlockAsync(targetPiece.Index, (int)block.Offset, (int)block.Size);
-            }
+            await peer.RequestBlockAsync(request.PieceIndex, request.Offset, request.Length);
 
             _logger.LogDebug(
-                "[{Endpoint}][INFO] Requesting block {Block} from piece {Piece}, at offset {Offset}, {Size}",
-                peer.Endpoint, block, targetPiece.Index, block.Offset, block.Size);
+                "[{Endpoint}][INFO] Requesting block from piece {Piece}, at offset {Offset}, {Size}",
+                peer.Endpoint, request.PieceIndex, request.Offset, request.Length);
         }
     }
 }
