@@ -7,18 +7,18 @@ using Fiumara.Core.Events;
 
 namespace Fiumara.Core;
 
-public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<PeerEvent> engineChannel, int piecesCount) : IDisposable
+public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<EngineEvent> engineChannel, int piecesCount) : IDisposable
 {
     public IPEndPoint Endpoint => endpoint;
     private TcpClient? _tcpClient;
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
-    private readonly ChannelWriter<PeerEvent>? _engineChannel = engineChannel;
+    private readonly ChannelWriter<EngineEvent>? _engineChannel = engineChannel;
     public bool AmChoked { get; private set; } = true;
     public bool AmChoking { get; private set; } = true;
 
-    public bool AmInterested { get; private set; } = false;
-    public bool IsInterested {get; private set;} = false;
+    public bool AmInterested { get; private set; }
+    public bool IsInterested {get; private set;}
 
     private static readonly byte[] InterestedMessage = [0, 0, 0, 1, 2];
 

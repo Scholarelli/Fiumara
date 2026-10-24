@@ -218,6 +218,9 @@ public class PieceManager
         return BlockOutcome.PieceCorrupted;
     }
 
+    public IReadOnlyList<Block> RemoveExpiredRequests() =>
+        _requests.RemoveExpired().Select(r => r.Block).ToList();
+
     public IReadOnlyList<Block> ReleasePeerRequests(PeerConnection peerConnection) =>
         _requests.RemovePeerPending(peerConnection);
 

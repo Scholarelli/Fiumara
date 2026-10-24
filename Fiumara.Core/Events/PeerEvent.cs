@@ -1,6 +1,11 @@
 namespace Fiumara.Core.Events;
 
-public abstract record PeerEvent(PeerConnection peer);
+
+public abstract record EngineEvent;
+
+public record Tick() : EngineEvent;
+
+public abstract record PeerEvent(PeerConnection peer) : EngineEvent;
 
 public record BitfieldReceived(PeerConnection Peer) : PeerEvent(Peer);
 public record HaveReceived(PeerConnection Peer, int PieceIndex) : PeerEvent(Peer);

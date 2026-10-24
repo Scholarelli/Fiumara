@@ -9,13 +9,14 @@ namespace Fiumara.Core;
 
 public class FiumaraEngine
 {
-    private readonly Channel<PeerEvent> _eventChannel = Channel.CreateUnbounded<PeerEvent>();
+    private readonly Channel<EngineEvent> _eventChannel = Channel.CreateUnbounded<EngineEvent>();
     private PieceManager _pieceManager;
 
     private static readonly string PeerId = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
     private readonly TrackerClient _trackerClient;
     private TorrentInfo _torrent;
     private FileStream _fileStream;
+    private Task _ticker;
 
     private readonly ConcurrentQueue<IPEndPoint> _waitingRoom = [];
     private readonly ConcurrentDictionary<IPEndPoint, PeerConnection> _activePeers = [];
@@ -83,9 +84,24 @@ public class FiumaraEngine
         trackerResponse.ForEach(endpoint => _waitingRoom.Enqueue(endpoint));
 
         _eventLoop = Task.Run(RunEventLoopAsync);
-
+        _ticker = RunTickerAsync();
 
         _ = ConnectAsync(_options.MaxPeers);
+    }
+
+
+    private async Task RunTickerAsync()
+    {
+        try
+        {
+            await foreach (var tick in Ticker.StartAsync(_options.TickPeriod, _timeProvider))
+                _eventChannel.Writer.TryWrite(tick);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ticker crashed");
+            throw;
+        }
     }
 
     private async Task RunEventLoopAsync()
@@ -185,7 +201,14 @@ public class FiumaraEngine
                 case BlockReceived b:
                     await HandleBlockReceived(b);
                     await FillPeerPipelineAsync(b.Peer);
-
+                    break;
+                case Tick:
+                    _pieceManager.RemoveExpiredRequests();
+                    foreach (var peer in _activePeers.Values)
+                    {
+                        await EvaluatePeerAsync(peer);
+                        await FillPeerPipelineAsync(peer);
+                    }
                     break;
             }
         }
