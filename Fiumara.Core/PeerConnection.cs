@@ -1,9 +1,11 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
+using Fiumara.Core.Protocol;
 
 namespace Fiumara.Core;
 
@@ -14,42 +16,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
     private readonly ChannelWriter<EngineEvent>? _engineChannel = engineChannel;
-    public bool AmChoked { get; private set; } = true;
-    public bool AmChoking { get; private set; } = true;
-
-    public bool AmInterested { get; private set; }
-    public bool IsInterested {get; private set;}
-
-    private static readonly byte[] InterestedMessage = [0, 0, 0, 1, 2];
-
-    private static readonly byte[] NotInterestedMessage = [0, 0, 0, 1, 3];
-    private static readonly byte[] KeepAliveMessage = [0, 0, 0, 0];
-    public async Task SetInterested(bool interested)
-    {
-        if (AmInterested == interested)
-            return;
-
-        AmInterested = interested;
-        if (AmInterested)
-            await SendMessageAsync(InterestedMessage);
-        else
-            await SendMessageAsync(NotInterestedMessage);
-    }
-
-
-    private enum MessageType : byte
-    {
-        Choke = 0,
-        Unchoke = 1,
-        Interested = 2,
-        NotInterested = 3,
-        Have = 4,
-        Bitfield = 5,
-        Request = 6,
-        Piece = 7,
-        Cancel = 8
-    }
-    public bool[] PeerBitfield { get; private set; } = new bool[piecesCount];
+    private readonly Channel<PeerMessage> _outbox =
+        Channel.CreateUnbounded<PeerMessage>(new UnboundedChannelOptions { SingleReader = true });
 
     public async Task ConnectAsync(TimeSpan handshakeTimeout, CancellationToken externalToken = default)
     {
@@ -66,23 +34,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
         Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
         _ = Task.Run(() => ReceiveMessageAsync(_cts.Token), _cts.Token);
-    }
-
-    private byte[] CreateHandshakeMessage()
-    {
-        const string protocolName = "BitTorrent protocol";
-        var handshake = new byte[68];
-        var span = handshake.AsSpan();
-        span[0] = 19;
-        span = span[1..];
-        Encoding.ASCII.GetBytes(protocolName, span);
-        span = span[19..];
-        span = span[8..];
-        infoHash.CopyTo(span);
-        span = span[20..];
-        Encoding.ASCII.GetBytes(peerId, span);
-
-        return handshake;
+        _ = Task.Run(() => WriteLoopAsync(_cts.Token), _cts.Token);
     }
 
     private async Task PerformHandshakeAsync(TimeSpan timeout, CancellationToken cancellationToken)
@@ -90,36 +42,19 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         handshakeCts.CancelAfter(timeout);
 
-        var handshakeMessage = CreateHandshakeMessage();
-        await _stream!.WriteAsync(handshakeMessage, handshakeCts.Token);
+        await _stream!.WriteAsync(PeerMessageCodec.EncodeHandshake(infoHash, Encoding.ASCII.GetBytes(peerId)),
+            handshakeCts.Token);
 
-        var responseBuffer = new byte[68];
+        var responseBuffer = new byte[PeerMessageCodec.HandshakeLength];
         await _stream.ReadExactlyAsync(responseBuffer, handshakeCts.Token);
 
-
-        if (!ValidateHandshakeResponse(responseBuffer))
-        {
-            throw new Exception("Invalid handshake response from peer.");
-        }
+        if (!PeerMessageCodec.TryDecodeHandshake(responseBuffer, infoHash, out var error))
+            throw new InvalidDataException($"Invalid handshake from peer: {error}");
 
 
     }
 
-    private bool ValidateHandshakeResponse(byte[] response)
-    {
-        if(response[0] != 19)
-            return false;
-
-
-        var protocol = Encoding.ASCII.GetString(response, 1, 19);
-        if (protocol != "BitTorrent protocol") return false;
-
-        var responseHash = response.AsSpan(28, 20);
-        return responseHash.SequenceEqual(infoHash);
-    }
-
-
-    public async Task ReceiveMessageAsync(CancellationToken cancellationToken)
+    private async Task ReceiveMessageAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -128,56 +63,42 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
             {
                 await _stream.ReadExactlyAsync(lengthBuffer, cancellationToken);
                 var messageLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBuffer);
+                switch (messageLength)
+                {
+                    case 0:
+                        continue;
+                    case > PeerMessageCodec.MaxFrameLength:
+                        Console.WriteLine($"Peer {endpoint.Address}:{endpoint.Port} sent a message larger than the maximum allowed length of {PeerMessageCodec.MaxFrameLength} bytes. Disconnecting.");
+                        Disconnect();
+                        return;
+                }
 
-
-                if (messageLength == 0) continue;
                 var messageBuffer = new byte[messageLength];
                 await _stream.ReadExactlyAsync(messageBuffer, cancellationToken);
 
-                var messageId = (MessageType)messageBuffer[0];
-                var payload = messageBuffer.AsSpan(1);
-
-                switch (messageId)
+                var decoded = PeerMessageCodec.TryDecode(messageBuffer, out var decodedMessage, out var error);
+                if(!decoded)
                 {
-                    case MessageType.Have:
-                        ParseHave(payload);
-                        break;
-                    case MessageType.Bitfield:
-                        ParseBitField(payload);
-                        break;
-                    case MessageType.Choke:
-                        AmChoked = true;
-                        _engineChannel!.TryWrite(new ChokeStateChanged(this, AmChoked));
-                        break;
-                    case MessageType.Unchoke:
-                        AmChoked = false;
-                        _engineChannel!.TryWrite(new ChokeStateChanged(this, AmChoked));
-                        break;
-                    case MessageType.Piece:
-                        var index = BinaryPrimitives.ReadInt32BigEndian(payload[0..4]);
-                        var offset = BinaryPrimitives.ReadInt32BigEndian(payload[4..8]);
-                        payload = payload[8..];
-                        _engineChannel!.TryWrite(new BlockReceived(this, index, offset, payload.ToArray()));
-                        break;
-                    case MessageType.Interested:
-                        IsInterested = true;
-                        _engineChannel!.TryWrite(new InterestedStateChanged(this, IsInterested));
-                        break;
-                    case MessageType.NotInterested:
-                        IsInterested = false;
-                        _engineChannel!.TryWrite(new InterestedStateChanged(this, IsInterested));
-                        break;
-                    case MessageType.Request:
-                        index = BinaryPrimitives.ReadInt32BigEndian(payload[0..4]);
-                        offset = BinaryPrimitives.ReadInt32BigEndian(payload[4..8]);
-                        payload = payload[8..];
-                        ParseRequest(payload);
-                        break;
-                    default:
-                        Console.WriteLine($"Received message of type {messageId} with length {messageLength}");
-                        break;
-
+                    Console.WriteLine($"Failed to decode message from peer {endpoint.Address}:{endpoint.Port}: {error}");
+                    Disconnect();
+                    return;
                 }
+
+                EngineEvent? engineEvent = decodedMessage switch
+                {
+                    PeerMessage.Choke => new ChokeStateChanged(this, true),
+                    PeerMessage.Unchoke => new ChokeStateChanged(this, false),
+                    PeerMessage.Interested => new InterestedStateChanged(this, true),
+                    PeerMessage.NotInterested => new InterestedStateChanged(this, false),
+                    PeerMessage.Have have => OnHave(have.PieceIndex),
+                    PeerMessage.Bitfield bitfield => OnBitfield(bitfield.Bits),
+                    PeerMessage.Piece piece => new BlockReceived(this, piece.PieceIndex, piece.Offset, piece.Data),
+                    PeerMessage.KeepAlive or PeerMessage.Unknown or PeerMessage.Request or PeerMessage.Cancel => null,
+                    _ => throw new UnreachableException($"Unhandled message {decodedMessage}")
+                };
+
+                if (engineEvent is not null)
+                    _engineChannel!.TryWrite(engineEvent);
             }
         }
         catch (EndOfStreamException)
@@ -198,112 +119,72 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         }
     }
 
-    private async Task SendMessageAsync(ReadOnlyMemory<byte> messageBuffer)
+    private EngineEvent? OnBitfield(byte[] bits)
+    {
+        if (!PeerMessageCodec.TryExpandBitfield(bits, piecesCount, out var pieces, out var error))
+        {
+            Console.WriteLine($"[{Endpoint}] Invalid bitfield: {error} Disconnecting.");
+            Disconnect();
+            return null;
+        }
+
+        return new BitfieldReceived(this, pieces);
+    }
+
+    private EngineEvent? OnHave(int pieceIndex)
+    {
+        // The codec already guarantees pieceIndex >= 0: only the upper bound depends on the torrent
+        if (pieceIndex >= piecesCount)
+        {
+            Console.WriteLine($"[{Endpoint}] Have for piece {pieceIndex}, but the torrent has {piecesCount} pieces. Disconnecting.");
+                Disconnect();
+            return null;
+        }
+
+        return new HaveReceived(this, pieceIndex);
+    }
+    public void SendHave(int pieceIndex) => Send(new PeerMessage.Have(pieceIndex));
+
+    public void RequestBlock(int pieceIndex, int offset, int size) =>
+        Send(new PeerMessage.Request(pieceIndex, offset, size));
+
+    public void SendInterested(bool interested) =>
+        Send(interested ? new PeerMessage.Interested() : new PeerMessage.NotInterested());
+
+    private void Send(PeerMessage message) => _outbox.Writer.TryWrite(message);
+
+    private async Task WriteLoopAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await _stream!.WriteAsync(messageBuffer, _cts!.Token);
-        } catch  (Exception e)
+            await foreach (var message in _outbox.Reader.ReadAllAsync(cancellationToken))
+                await _stream!.WriteAsync(PeerMessageCodec.Encode(message), cancellationToken);
+        }
+        catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
         {
-            Console.WriteLine(e);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[{Endpoint}] Write failed: {e.Message}");
+            Disconnect();
         }
     }
 
-    public async Task SendHaveAsync(int pieceIndex)
-    {
-        var haveMessage = new byte[9];
-        var haveSpan = haveMessage.AsSpan();
-        BinaryPrimitives.WriteUInt32BigEndian(haveSpan[..4], 5);
-        haveMessage[4] = (byte)MessageType.Have;
-        BinaryPrimitives.WriteInt32BigEndian(haveSpan[5..9], pieceIndex);
-        await SendMessageAsync(haveMessage);
-    }
-
-    public async Task RequestBlockAsync(int pieceIndex, int offset, int size)
-    {
-        var requestMessage = new byte[17];
-        var requestSpan = requestMessage.AsSpan();
-        BinaryPrimitives.WriteUInt32BigEndian(requestSpan[0..4], 13);
-        requestMessage[4] = (byte)MessageType.Request;
-        BinaryPrimitives.WriteInt32BigEndian(requestSpan[5..9], pieceIndex);
-        BinaryPrimitives.WriteInt32BigEndian(requestSpan[9..13], offset);
-        BinaryPrimitives.WriteInt32BigEndian(requestSpan[13..17], size);
-
-        await SendMessageAsync(requestMessage);
-    }
-
+    private int _disposed;
     public void Disconnect()
     {
-        _cts?.Cancel();
-    }
-
-    private void ParseHave(ReadOnlySpan<byte> payload)
-    {
-        if (payload.Length != 4)
-        {
-            Console.WriteLine("Invalid Have message length.");
+        if(Volatile.Read(ref _disposed) == 1)
             return;
-        }
-
-        int pieceIndex = BinaryPrimitives.ReadInt32BigEndian(payload);
-
-        if (pieceIndex >= 0 && pieceIndex < PeerBitfield.Length)
-        {
-            if (PeerBitfield[pieceIndex]) return;
-            PeerBitfield[pieceIndex] = true;
-            Console.WriteLine($"Peer just acquired piece {pieceIndex}.");
-
-            _engineChannel!.TryWrite(new HaveReceived(this, pieceIndex));
-        }
-        else
-        {
-            Console.WriteLine($"Peer sent out-of-bounds Have message: {pieceIndex}");
-            Disconnect();
-        }
-    }
-
-    private void ParseBitField(ReadOnlySpan<byte> payload)
-    {
-        // One bit per piece, rounded up to whole bytes: (n + 7) / 8 is an integer ceiling division
-        int expectedLength = (PeerBitfield.Length + 7) / 8;
-        if (payload.Length != expectedLength)
-        {
-            Console.WriteLine($"Peer sent a Bitfield of {payload.Length} bytes, expected {expectedLength}. Disconnecting.");
-            Disconnect();
-            return;
-        }
-
-        // As to protocol, the bits after the last piece are padding and must be zero
-        int spareBits = expectedLength * 8 - PeerBitfield.Length;
-        if (spareBits > 0 && (payload[^1] & ((1 << spareBits) - 1)) != 0)
-        {
-            Console.WriteLine("Peer sent a Bitfield with spare bits set. Disconnecting.");
-            Disconnect();
-            return;
-        }
-
-        for (int i = 0; i < payload.Length; i++)
-        {
-            byte b = payload[i];
-            int baseIndex = i * 8;
-            for (int bit = 0; bit < 8; bit++)
-            {
-                if (baseIndex + bit >= PeerBitfield.Length) break;
-                // The most significant bit of each byte is the lowest piece index
-                PeerBitfield[baseIndex + bit] = (b & (1 << (7 - bit))) != 0;
-            }
-        }
-
-        _engineChannel!.TryWrite(new BitfieldReceived(this));
-    }
-
-    private void ParseRequest(ReadOnlySpan<byte> payload)
-    {
+        _outbox.Writer.TryComplete();
+        try { _cts?.Cancel(); }
+        catch (ObjectDisposedException) { }
 
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+        _outbox.Writer.TryComplete();
         _cts?.Cancel();
         _cts?.Dispose();
         _tcpClient?.Dispose();

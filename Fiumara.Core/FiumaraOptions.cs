@@ -2,9 +2,16 @@ using System.Runtime.CompilerServices;
 
 namespace Fiumara.Core;
 
+
+public interface ISwarmOptions
+{
+    int MaxPeers { get; }
+    TimeSpan HandshakeTimeout { get; }
+}
+
 // Behaviour the host (CLI, tests, a future web UI) can change; the defaults are what the engine always did.
 // Protocol constants (block size, message ids, handshake layout) are not settings and stay in the code.
-public record FiumaraOptions
+public record FiumaraOptions : ISwarmOptions
 {
     public static FiumaraOptions Default { get; } = new();
 

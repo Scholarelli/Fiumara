@@ -14,6 +14,7 @@ public readonly record struct TorrentInfo(
     IReadOnlyList<byte> Pieces)
 {
     public Uri Announce => AnnounceList[0];
+    public int PieceCount => (int)((TotalSize + PieceLength - 1) / PieceLength);
 }
 
 public class TorrentParser

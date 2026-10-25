@@ -104,7 +104,7 @@ public class PieceManager
     {
         _requests = requests ?? new RequestsRegister();
 
-        int totalPieces = (int)Math.Ceiling((double)torrent.TotalSize / torrent.PieceLength);
+        int totalPieces = torrent.PieceCount;
         _pieces = new Piece[totalPieces];
 
         ReadOnlySpan<byte> allHashes = torrent.Pieces.ToArray();
@@ -140,13 +140,10 @@ public class PieceManager
         }
     }
 
-    public void UnregisterPeerPiece(IPEndPoint endPoint, bool[] peerBitField)
+    public void UnregisterPeerPiece(IPEndPoint endPoint)
     {
         foreach (var piece in _pieces)
-        {
-            if (peerBitField[piece.Index])
-                piece.AvailableOnPeers.Remove(endPoint);
-        }
+            piece.AvailableOnPeers.Remove(endPoint);
     }
 
     public Piece GetPiece(int index)
