@@ -18,7 +18,7 @@ internal sealed class PeerState(int pieceCount)
 
 internal sealed record ActivePeer(PeerConnection Connection, PeerState State);
 
-internal class PeerSwarm
+internal partial class PeerSwarm
 {
     public static readonly string PeerId = $"-FMR0001-{Random.Shared.Next(1000000000):D11}";
     private static readonly byte[] PeerIdBytes = Encoding.ASCII.GetBytes(PeerId);
@@ -28,14 +28,16 @@ internal class PeerSwarm
     private readonly ChannelWriter<EngineEvent> _eventChannel;
     private readonly IReadOnlyList<byte> _infoHash;
     private readonly int _pieceCount;
+    private readonly ILoggerFactory _loggers;
     private readonly ILogger<PeerSwarm> _logger;
 
 
     internal PeerSwarm(IReadOnlyList<byte> infoHash, int pieceCount, ChannelWriter<EngineEvent> events,
-        ISwarmOptions options, ILogger<PeerSwarm> logger)
+        ISwarmOptions options, ILoggerFactory loggers)
     {
         _options = options;
-        _logger = logger;
+        _loggers = loggers;
+        _logger = loggers.CreateLogger<PeerSwarm>();
         _eventChannel = events;
         _infoHash = infoHash;
         _pieceCount = pieceCount;
@@ -51,22 +53,22 @@ internal class PeerSwarm
     private void RemovePeer(PeerConnection connection)
     {
         if (_activePeers.Remove(connection))
-            _logger.LogInformation("Peer {Endpoint} removed from active peers.", connection.Endpoint);
+            Log.PeerRemoved(_logger, connection.Endpoint);
         else
-            _logger.LogInformation("Peer {Endpoint} was not found in active peers.", connection.Endpoint);
+            Log.PeerNotFound(_logger, connection.Endpoint);
     }
 
     public void AddEndpoint(IPEndPoint endpoint)
     {
         if (_activePeers.Keys.Any(peer => peer.Endpoint.Equals(endpoint)))
         {
-            _logger.LogInformation("Peer {Endpoint} is already connected.", endpoint);
+            Log.AlreadyConnected(_logger, endpoint);
             return;
         }
 
         if (_waitingRoom.Contains(endpoint))
         {
-            _logger.LogInformation("Peer {Endpoint} is already in the waiting room.", endpoint);
+            Log.AlreadyWaiting(_logger, endpoint);
             return;
         }
 
@@ -79,12 +81,13 @@ internal class PeerSwarm
         {
             if (!_waitingRoom.TryDequeue(out var endpoint))
             {
-                _logger.LogInformation("No more peers available in the waiting room.");
+                Log.WaitingRoomEmpty(_logger);
                 break;
             }
 
 
-            var peer = new PeerConnection(endpoint, [.. _infoHash], PeerId, _eventChannel, _pieceCount);
+            var peer = new PeerConnection(endpoint, [.. _infoHash], PeerId, _eventChannel, _pieceCount,
+                _loggers.CreateLogger<PeerConnection>());
             _activePeers.Add(peer, new PeerState(_pieceCount));
 
             _ = SafeConnectAsync(peer, endpoint);
@@ -99,8 +102,7 @@ internal class PeerSwarm
         }
         catch (Exception ex)
         {
-            _logger.LogError("Attempted to connect to peer {Endpoint} but failed: {ErrorMessage}", endpoint,
-                ex.Message);
+            Log.ConnectFailed(_logger, endpoint, ex.Message);
 
             // Let the handle clean up the dead peer and optionally spawn a replacement
             _eventChannel.TryWrite(new PeerDisconnected(peer));
@@ -114,13 +116,13 @@ internal class PeerSwarm
 
         if (remotePeerId.AsSpan().SequenceEqual(PeerIdBytes))
         {
-            _logger.LogInformation("Peer {Endpoint} is ourselves.", peer.Endpoint);
+            Log.SelfConnection(_logger, peer.Endpoint);
             return false;
         }
 
         if (_activePeers.Values.Any(other => other.RemotePeerId is { } id && id.AsSpan().SequenceEqual(remotePeerId)))
         {
-            _logger.LogInformation("Peer {Endpoint} is already connected through another address.", peer.Endpoint);
+            Log.DuplicatePeerId(_logger, peer.Endpoint);
             return false;
         }
 
@@ -145,7 +147,7 @@ internal class PeerSwarm
             sent++;
         }
 
-        _logger.LogDebug("Sent HAVE for piece {PieceIndex} to {Count} peers.", pieceIndex, sent);
+        Log.HaveBroadcast(_logger, pieceIndex, sent);
     }
 
     public void SetInterest(PeerConnection peer, bool interested)
@@ -155,5 +157,36 @@ internal class PeerSwarm
 
         state.AmInterested = interested;
         peer.SendInterested(interested);
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(2001, LogLevel.Debug, "Peer {Endpoint} removed from active peers.")]
+        public static partial void PeerRemoved(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2002, LogLevel.Warning, "Peer {Endpoint} was not found in active peers.")]
+        public static partial void PeerNotFound(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2003, LogLevel.Debug, "Peer {Endpoint} is already connected.")]
+        public static partial void AlreadyConnected(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2004, LogLevel.Debug, "Peer {Endpoint} is already in the waiting room.")]
+        public static partial void AlreadyWaiting(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2005, LogLevel.Information, "No more peers available in the waiting room.")]
+        public static partial void WaitingRoomEmpty(ILogger logger);
+
+        [LoggerMessage(2006, LogLevel.Information, "Could not connect to peer {Endpoint}: {Reason}")]
+        public static partial void ConnectFailed(ILogger logger, IPEndPoint endpoint, string reason);
+
+        [LoggerMessage(2007, LogLevel.Information, "Peer {Endpoint} is ourselves. Disconnecting.")]
+        public static partial void SelfConnection(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2008, LogLevel.Information,
+            "Peer {Endpoint} is already connected through another address. Disconnecting.")]
+        public static partial void DuplicatePeerId(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2009, LogLevel.Debug, "Sent HAVE for piece {PieceIndex} to {Count} peers.")]
+        public static partial void HaveBroadcast(ILogger logger, int pieceIndex, int count);
     }
 }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
 using Fiumara.Core.Protocol;
@@ -8,7 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fiumara.Core;
 
-public class TorrentHandle
+public partial class TorrentHandle
 {
     private readonly Channel<EngineEvent> _eventChannel = Channel.CreateUnbounded<EngineEvent>();
     private readonly PieceManager _pieceManager;
@@ -36,8 +37,7 @@ public class TorrentHandle
 
         var loggers = loggerFactory ?? NullLoggerFactory.Instance;
         _logger = loggers.CreateLogger<TorrentHandle>();
-        _swarm = new PeerSwarm(_torrent.InfoHash, _torrent.PieceCount, _eventChannel.Writer, _options,
-            loggers.CreateLogger<PeerSwarm>());
+        _swarm = new PeerSwarm(_torrent.InfoHash, _torrent.PieceCount, _eventChannel.Writer, _options, loggers);
 
         _timeProvider = timeProvider ?? TimeProvider.System;
         _trackerClient = new TrackerClient(PeerSwarm.PeerId, _options.ListenPort);
@@ -68,7 +68,7 @@ public class TorrentHandle
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ticker crashed");
+            Log.TickerCrashed(_logger, ex);
             throw;
         }
     }
@@ -81,7 +81,7 @@ public class TorrentHandle
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Event loop crashed");
+            Log.EventLoopCrashed(_logger, ex);
             throw;
         }
     }
@@ -97,27 +97,21 @@ public class TorrentHandle
     {
         var outcome = _pieceManager.OnBlockReceived(b.PieceIndex, b.Offset, b.Data);
 
-        _logger.LogDebug(
-            "[{Endpoint}][INFO] Received block for piece {PieceIndex} at offset {Offset}, size {DataLength}: {Outcome}",
-            b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length, outcome);
+        Log.BlockReceived(_logger, b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length, outcome);
 
         switch (outcome)
         {
             case BlockOutcome.PieceVerified:
                 var piece = _pieceManager.GetPiece(b.PieceIndex);
-                _logger.LogInformation("[{Endpoint}][SUCCESS] Piece {PieceIndex} verified! Writing to disk...",
-                    b.Peer.Endpoint, piece.Index);
+                Log.PieceVerified(_logger, piece.Index);
                 await _storage.WritePieceAsync(piece.Index, piece.Buffer);
                 _swarm.BroadcastHave(piece.Index);
                 break;
             case BlockOutcome.PieceCorrupted:
-                _logger.LogError("[{Endpoint}][ERROR] Piece {PieceIndex} failed hash check! Trashing data.",
-                    b.Peer.Endpoint, b.PieceIndex);
+                Log.PieceCorrupted(_logger, b.PieceIndex);
                 break;
             case BlockOutcome.Rejected:
-                _logger.LogWarning(
-                    "[{Endpoint}][WARN] Invalid block (piece {PieceIndex}, offset {Offset}, size {DataLength}). Disconnecting.",
-                    b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
+                Log.InvalidBlock(_logger, b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length);
                 b.Peer.Disconnect();
                 break;
         }
@@ -137,7 +131,7 @@ public class TorrentHandle
                     await HandlePeerEventAsync(peerEvent, state);
                     break;
                 case PeerEvent peerEvent:
-                    _logger.LogDebug("[{Endpoint}] Ignoring {Event} from an inactive peer.", peerEvent.Peer.Endpoint, peerEvent.GetType().Name);
+                    Log.InactivePeerEvent(_logger, peerEvent.Peer.Endpoint, peerEvent.GetType().Name);
                     break;
             }
         }
@@ -173,13 +167,13 @@ public class TorrentHandle
                 break;
             case ChokeStateChanged c:
                 state.PeerChoking = c.IsChoked;
-                _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}", c.Peer.Endpoint,
-                    c.IsChoked ? "Choked" : "Unchoked");
                 if (c.IsChoked)
                 {
+                    Log.Choked(_logger, c.Peer.Endpoint);
                     _pieceManager.ReleasePeerRequests(c.Peer);
                     break;
                 }
+                Log.Unchoked(_logger, c.Peer.Endpoint);
                 EvaluatePeer(c.Peer, state);
                 FillPeerPipeline(c.Peer, state);
                 break;
@@ -206,12 +200,13 @@ public class TorrentHandle
                 break;
             case InterestedStateChanged i:
                 state.PeerInterested = i.IsInterested;
-                _logger.LogInformation("[{Endpoint}][INTEREST] Peer interest state: {State}",
-                    i.Peer.Endpoint, i.IsInterested ? "Interested" : "Not Interested");
+                if (i.IsInterested)
+                    Log.PeerInterested(_logger, i.Peer.Endpoint);
+                else
+                    Log.PeerNotInterested(_logger, i.Peer.Endpoint);
                 break;
             default:
-                _logger.LogWarning("[{Endpoint}] Unhandled event type: {EventType}", peerEvent.Peer.Endpoint,
-                    peerEvent.GetType().Name);
+                Log.UnhandledEvent(_logger, peerEvent.Peer.Endpoint, peerEvent.GetType().Name);
                 break;
         }
     }
@@ -231,10 +226,53 @@ public class TorrentHandle
             if (_pieceManager.ReserveNextBlock(peer, state.Has) is not { } request) break;
 
             peer.RequestBlock(request.PieceIndex, request.Offset, request.Length);
-
-            _logger.LogDebug(
-                "[{Endpoint}][INFO] Requesting block from piece {Piece}, at offset {Offset}, {Size}",
-                peer.Endpoint, request.PieceIndex, request.Offset, request.Length);
+            Log.BlockRequested(_logger, peer.Endpoint, request.PieceIndex, request.Offset, request.Length);
         }
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(1001, LogLevel.Error, "The ticker crashed.")]
+        public static partial void TickerCrashed(ILogger logger, Exception exception);
+
+        [LoggerMessage(1002, LogLevel.Error, "The event loop crashed.")]
+        public static partial void EventLoopCrashed(ILogger logger, Exception exception);
+
+        [LoggerMessage(1003, LogLevel.Trace,
+            "Block at offset {Offset} of piece {PieceIndex} ({Length} bytes) from peer {Endpoint}: {Outcome}.")]
+        public static partial void BlockReceived(ILogger logger, IPEndPoint endpoint, int pieceIndex, int offset, int length, BlockOutcome outcome);
+
+        [LoggerMessage(1004, LogLevel.Information, "Piece {PieceIndex} verified, writing it to disk.")]
+        public static partial void PieceVerified(ILogger logger, int pieceIndex);
+
+        [LoggerMessage(1005, LogLevel.Warning,
+            "Piece {PieceIndex} failed the hash check and will be downloaded again.")]
+        public static partial void PieceCorrupted(ILogger logger, int pieceIndex);
+
+        [LoggerMessage(1006, LogLevel.Warning,
+            "Peer {Endpoint} sent an invalid block (piece {PieceIndex}, offset {Offset}, {Length} bytes). Disconnecting.")]
+        public static partial void InvalidBlock(ILogger logger, IPEndPoint endpoint, int pieceIndex, int offset, int length);
+
+        [LoggerMessage(1007, LogLevel.Debug, "Ignoring {EventName} from inactive peer {Endpoint}.")]
+        public static partial void InactivePeerEvent(ILogger logger, IPEndPoint endpoint, string eventName);
+
+        [LoggerMessage(1008, LogLevel.Information, "Peer {Endpoint} choked us.")]
+        public static partial void Choked(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(1009, LogLevel.Information, "Peer {Endpoint} unchoked us.")]
+        public static partial void Unchoked(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(1010, LogLevel.Debug, "Peer {Endpoint} is interested in us.")]
+        public static partial void PeerInterested(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(1011, LogLevel.Debug, "Peer {Endpoint} is no longer interested in us.")]
+        public static partial void PeerNotInterested(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(1012, LogLevel.Warning, "Unhandled {EventName} from peer {Endpoint}.")]
+        public static partial void UnhandledEvent(ILogger logger, IPEndPoint endpoint, string eventName);
+
+        [LoggerMessage(1013, LogLevel.Trace,
+            "Requesting the block at offset {Offset} of piece {PieceIndex} ({Length} bytes) from peer {Endpoint}.")]
+        public static partial void BlockRequested(ILogger logger, IPEndPoint endpoint, int pieceIndex, int offset, int length);
     }
 }

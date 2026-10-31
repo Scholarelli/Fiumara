@@ -6,16 +6,18 @@ using System.Text;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
 using Fiumara.Core.Protocol;
+using Microsoft.Extensions.Logging;
 
 namespace Fiumara.Core;
 
-public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<EngineEvent> engineChannel, int piecesCount) : IDisposable
+public partial class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId, ChannelWriter<EngineEvent> engineChannel, int piecesCount, ILogger<PeerConnection> logger) : IDisposable
 {
     public IPEndPoint Endpoint => endpoint;
     private TcpClient? _tcpClient;
     private NetworkStream?_stream;
     private CancellationTokenSource? _cts;
     private readonly ChannelWriter<EngineEvent>? _engineChannel = engineChannel;
+    private readonly ILogger<PeerConnection> _logger = logger;
     private readonly Channel<PeerMessage> _outbox =
         Channel.CreateUnbounded<PeerMessage>(new UnboundedChannelOptions { SingleReader = true });
 
@@ -32,7 +34,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
         var remotePeerId = await PerformHandshakeAsync(handshakeTimeout, _cts.Token);
 
-        Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
+        Log.Connected(_logger, endpoint);
         var token = _cts.Token;
         _engineChannel!.TryWrite(new PeerConnected(this, remotePeerId));
         _ = Task.Run(() => ReceiveMessageAsync(token));
@@ -71,7 +73,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                     case 0:
                         continue;
                     case > PeerMessageCodec.MaxFrameLength:
-                        Console.WriteLine($"Peer {endpoint.Address}:{endpoint.Port} sent a message larger than the maximum allowed length of {PeerMessageCodec.MaxFrameLength} bytes. Disconnecting.");
+                        Log.FrameTooLarge(_logger, endpoint, messageLength, PeerMessageCodec.MaxFrameLength);
                         Disconnect();
                         return;
                 }
@@ -79,17 +81,16 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                 var messageBuffer = new byte[messageLength];
                 await _stream.ReadExactlyAsync(messageBuffer, cancellationToken);
 
-                var decoded = PeerMessageCodec.TryDecode(messageBuffer, out var decodedMessage, out var error);
-                if(!decoded)
+                if (!PeerMessageCodec.TryDecode(messageBuffer, out var decodedMessage, out var error))
                 {
-                    Console.WriteLine($"Failed to decode message from peer {endpoint.Address}:{endpoint.Port}: {error}");
+                    Log.MalformedMessage(_logger, endpoint, error);
                     Disconnect();
                     return;
                 }
 
                 if (decodedMessage is PeerMessage.Bitfield && receivedAnyMessage)
                 {
-                    Console.WriteLine($"[{Endpoint}] Bitfield after other messages. Disconnecting.");
+                    Log.LateBitfield(_logger, endpoint);
                     Disconnect();
                     return;
                 }
@@ -114,18 +115,18 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         }
         catch (EndOfStreamException)
         {
-            Console.WriteLine($"[Peer disconnected] {endpoint.Address}:{endpoint.Port} closed the stream");
+            Log.ClosedByPeer(_logger, endpoint);
         }
         catch (IOException e)
         {
-            Console.WriteLine($"[Peer Dropped] {Endpoint} connection lost: {e.Message}");
+            Log.ConnectionLost(_logger, endpoint, e.Message);
         }
         catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
         {
         }
         catch (Exception e)
         {
-            Console.WriteLine(e);
+            Log.ReceiveFailed(_logger, endpoint, e);
         }
         finally
         {
@@ -137,7 +138,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
     {
         if (!PeerMessageCodec.TryExpandBitfield(bits, piecesCount, out var pieces, out var error))
         {
-            Console.WriteLine($"[{Endpoint}] Invalid bitfield: {error} Disconnecting.");
+            Log.InvalidBitfield(_logger, endpoint, error);
             Disconnect();
             return null;
         }
@@ -150,8 +151,8 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         // The codec already guarantees pieceIndex >= 0: only the upper bound depends on the torrent
         if (pieceIndex >= piecesCount)
         {
-            Console.WriteLine($"[{Endpoint}] Have for piece {pieceIndex}, but the torrent has {piecesCount} pieces. Disconnecting.");
-                Disconnect();
+            Log.HaveOutOfRange(_logger, endpoint, pieceIndex, piecesCount);
+            Disconnect();
             return null;
         }
 
@@ -179,7 +180,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         }
         catch (Exception e)
         {
-            Console.WriteLine($"[{Endpoint}] Write failed: {e.Message}");
+            Log.WriteFailed(_logger, endpoint, e.Message);
             Disconnect();
         }
     }
@@ -203,5 +204,40 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         _cts?.Dispose();
         _tcpClient?.Dispose();
         _stream?.Dispose();
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(3001, LogLevel.Information, "Connected to peer {Endpoint}.")]
+        public static partial void Connected(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(3002, LogLevel.Warning,
+            "Peer {Endpoint} announced a {Length}-byte message, more than the {MaxLength} allowed. Disconnecting.")]
+        public static partial void FrameTooLarge(ILogger logger, IPEndPoint endpoint, uint length, int maxLength);
+
+        [LoggerMessage(3003, LogLevel.Warning, "Peer {Endpoint} sent a malformed message: {Error} Disconnecting.")]
+        public static partial void MalformedMessage(ILogger logger, IPEndPoint endpoint, string error);
+
+        [LoggerMessage(3004, LogLevel.Warning, "Peer {Endpoint} sent a bitfield after other messages. Disconnecting.")]
+        public static partial void LateBitfield(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(3005, LogLevel.Information, "Peer {Endpoint} closed the connection.")]
+        public static partial void ClosedByPeer(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(3006, LogLevel.Information, "Lost the connection to peer {Endpoint}: {Reason}")]
+        public static partial void ConnectionLost(ILogger logger, IPEndPoint endpoint, string reason);
+
+        [LoggerMessage(3007, LogLevel.Error, "Receiving from peer {Endpoint} failed.")]
+        public static partial void ReceiveFailed(ILogger logger, IPEndPoint endpoint, Exception exception);
+
+        [LoggerMessage(3008, LogLevel.Warning, "Peer {Endpoint} sent an invalid bitfield: {Error} Disconnecting.")]
+        public static partial void InvalidBitfield(ILogger logger, IPEndPoint endpoint, string error);
+
+        [LoggerMessage(3009, LogLevel.Warning,
+            "Peer {Endpoint} announced piece {PieceIndex}, but the torrent has {PieceCount} pieces. Disconnecting.")]
+        public static partial void HaveOutOfRange(ILogger logger, IPEndPoint endpoint, int pieceIndex, int pieceCount);
+
+        [LoggerMessage(3010, LogLevel.Information, "Writing to peer {Endpoint} failed: {Reason}")]
+        public static partial void WriteFailed(ILogger logger, IPEndPoint endpoint, string reason);
     }
 }
