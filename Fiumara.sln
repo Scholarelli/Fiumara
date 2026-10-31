@@ -1,8 +1,8 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fiumara.Core", "Fiumara.Core\Fiumara.Core.csproj", "{3B4B488A-1EA4-46F9-B505-6B2CBE7FB9D7}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fiumara.Core", "src\Fiumara.Core\Fiumara.Core.csproj", "{3B4B488A-1EA4-46F9-B505-6B2CBE7FB9D7}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fiumara.Cli", "Fiumara.Cli\Fiumara.Cli.csproj", "{91C73912-BB4E-48F5-9ED0-52F960B380DC}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fiumara.Cli", "src\Fiumara.Cli\Fiumara.Cli.csproj", "{91C73912-BB4E-48F5-9ED0-52F960B380DC}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
