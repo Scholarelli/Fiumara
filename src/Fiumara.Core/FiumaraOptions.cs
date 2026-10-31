@@ -7,6 +7,7 @@ public interface ISwarmOptions
 {
     int MaxPeers { get; }
     TimeSpan HandshakeTimeout { get; }
+    TimeSpan SnubTimeout { get; }
 }
 
 // Behaviour the host (CLI, tests, a future web UI) can change; the defaults are what the engine always did.
@@ -30,6 +31,7 @@ public record FiumaraOptions : ISwarmOptions
     public TimeSpan TickPeriod { get; init; } = TimeSpan.FromMilliseconds(500);
 
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(5);
+    public TimeSpan SnubTimeout { get; init; } = TimeSpan.FromMinutes(1);
 
     // Port announced to the tracker (nothing listens on it yet)
     public int ListenPort { get; init; } = 6881;
@@ -42,6 +44,7 @@ public record FiumaraOptions : ISwarmOptions
         ThrowIfNotPositive(RequestTimeout);
         ThrowIfNotPositive(TickPeriod);
         ThrowIfNotPositive(HandshakeTimeout);
+        ThrowIfNotPositive(SnubTimeout);
         ArgumentOutOfRangeException.ThrowIfLessThan(ListenPort, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(ListenPort, 65535);
     }

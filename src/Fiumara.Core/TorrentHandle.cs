@@ -17,15 +17,16 @@ public partial class TorrentHandle
     private readonly TrackerClient _trackerClient;
     private readonly TorrentInfo _torrent;
     private readonly PieceStorage _storage;
-    private Task _ticker = Task. CompletedTask;
+    private Task? _ticker;
 
     private readonly PeerSwarm _swarm;
     private readonly ILogger<TorrentHandle> _logger;
     private readonly FiumaraOptions _options;
     private readonly TimeProvider _timeProvider;
     private Task? _eventLoop;
+    private Task? _completion;
 
-    public Task Completion => _eventLoop
+    public Task Completion => _completion
                               ?? throw new InvalidOperationException("TorrentHandle has not been started.");
 
     public TorrentHandle(TorrentInfo torrent, ILoggerFactory? loggerFactory = null, FiumaraOptions? options = null,
@@ -37,9 +38,10 @@ public partial class TorrentHandle
 
         var loggers = loggerFactory ?? NullLoggerFactory.Instance;
         _logger = loggers.CreateLogger<TorrentHandle>();
-        _swarm = new PeerSwarm(_torrent.InfoHash, _torrent.PieceCount, _eventChannel.Writer, _options, loggers);
-
         _timeProvider = timeProvider ?? TimeProvider.System;
+
+        _swarm = new PeerSwarm(_torrent.InfoHash, _torrent.PieceCount, _eventChannel.Writer, _options, loggers, _timeProvider);
+
         _trackerClient = new TrackerClient(PeerSwarm.PeerId, _options.ListenPort);
 
         _pieceManager = new PieceManager(_torrent, new RequestsRegister(_options.RequestTimeout, _timeProvider));
@@ -56,6 +58,7 @@ public partial class TorrentHandle
 
         _eventLoop = Task.Run(RunEventLoopAsync);
         _ticker = RunTickerAsync();
+        _completion = Task.WhenAny(_eventLoop, _ticker).Unwrap();
     }
 
 
@@ -96,7 +99,8 @@ public partial class TorrentHandle
     private async Task HandleBlockReceived(BlockReceived b)
     {
         var outcome = _pieceManager.OnBlockReceived(b.PieceIndex, b.Offset, b.Data);
-
+        if (outcome != BlockOutcome.Rejected)
+            _swarm.Unsnub(b.Peer);
         Log.BlockReceived(_logger, b.Peer.Endpoint, b.PieceIndex, b.Offset, b.Data.Length, outcome);
 
         switch (outcome)
@@ -139,7 +143,9 @@ public partial class TorrentHandle
 
     private void HandleTick()
     {
-        _pieceManager.RemoveExpiredRequests();
+        foreach (var (_, peer) in _pieceManager.RemoveExpiredRequests())
+            _swarm.Snub(peer);
+        _swarm.DisconnectExpiredSnubs();
         AssertAvailability();
         foreach (var (peer, state) in _swarm.ActivePeers)
         {
@@ -216,7 +222,7 @@ public partial class TorrentHandle
 
     private void FillPeerPipeline(PeerConnection peer, PeerState state)
     {
-        if (state.PeerChoking)
+        if (state.PeerChoking || state.IsSnubbed)
             return;
 
         int maxPipelineSize = _options.MaxPipelineSize;

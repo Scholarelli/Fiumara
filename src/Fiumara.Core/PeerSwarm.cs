@@ -14,6 +14,8 @@ internal sealed class PeerState(int pieceCount)
     public bool AmInterested { get; set; } // noi siamo interessati al peer
     public bool[] Has { get; set; } = new bool[pieceCount];
     public byte[]? RemotePeerId { get; set; }
+    public long? SnubbedSince { get; set; }
+    public bool IsSnubbed => SnubbedSince.HasValue;
 }
 
 internal sealed record ActivePeer(PeerConnection Connection, PeerState State);
@@ -30,10 +32,11 @@ internal partial class PeerSwarm
     private readonly int _pieceCount;
     private readonly ILoggerFactory _loggers;
     private readonly ILogger<PeerSwarm> _logger;
+    private readonly TimeProvider _timeProvider;
 
 
     internal PeerSwarm(IReadOnlyList<byte> infoHash, int pieceCount, ChannelWriter<EngineEvent> events,
-        ISwarmOptions options, ILoggerFactory loggers)
+        ISwarmOptions options, ILoggerFactory loggers, TimeProvider timeProvider)
     {
         _options = options;
         _loggers = loggers;
@@ -41,6 +44,7 @@ internal partial class PeerSwarm
         _eventChannel = events;
         _infoHash = infoHash;
         _pieceCount = pieceCount;
+        _timeProvider = timeProvider;
     }
 
     public IReadOnlyCollection<ActivePeer> ActivePeers =>
@@ -106,6 +110,38 @@ internal partial class PeerSwarm
 
             // Let the handle clean up the dead peer and optionally spawn a replacement
             _eventChannel.TryWrite(new PeerDisconnected(peer));
+        }
+    }
+
+    public void Snub(PeerConnection peer)
+    {
+        if (!TryGetState(peer, out var state) || state.IsSnubbed)
+            return;
+
+        state.SnubbedSince = _timeProvider.GetTimestamp();
+        Log.PeerSnubbed(_logger, peer.Endpoint);
+    }
+
+    public void Unsnub(PeerConnection peer)
+    {
+        if (!TryGetState(peer, out var state) || !state.IsSnubbed)
+            return;
+
+        state.SnubbedSince = null;
+        Log.PeerUnsnubbed(_logger, peer.Endpoint);
+    }
+
+    public void DisconnectExpiredSnubs()
+    {
+        var now = _timeProvider.GetTimestamp();
+        foreach (var (peer, state) in _activePeers)
+        {
+            if (state.SnubbedSince is not { } since
+                || _timeProvider.GetElapsedTime(since, now) <= _options.SnubTimeout)
+                continue;
+
+            Log.SnubTimedOut(_logger, peer.Endpoint, _options.SnubTimeout);
+            peer.Disconnect();
         }
     }
 
@@ -188,5 +224,16 @@ internal partial class PeerSwarm
 
         [LoggerMessage(2009, LogLevel.Debug, "Sent HAVE for piece {PieceIndex} to {Count} peers.")]
         public static partial void HaveBroadcast(ILogger logger, int pieceIndex, int count);
+
+        [LoggerMessage(2010, LogLevel.Information,
+            "Peer {Endpoint} is snubbing us: no more blocks will be requested from it.")]
+        public static partial void PeerSnubbed(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2011, LogLevel.Information, "Peer {Endpoint} sent a block again and is no longer snubbed.")]
+        public static partial void PeerUnsnubbed(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2012, LogLevel.Warning,
+            "Peer {Endpoint} has been snubbing us for more than {Timeout}. Disconnecting.")]
+        public static partial void SnubTimedOut(ILogger logger, IPEndPoint endpoint, TimeSpan timeout);
     }
 }
