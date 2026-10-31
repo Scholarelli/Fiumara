@@ -1,4 +1,3 @@
-using System.Net;
 using System.Security.Cryptography;
 using BencodeNET.Torrents;
 
@@ -41,8 +40,6 @@ public class Piece
 
     public byte[]? Buffer {get; private set;}
 
-    public HashSet<IPEndPoint> AvailableOnPeers { get; } = new();
-
     public Piece(int index, long pieceSize, byte[] expectedHash)
     {
         Index = index;
@@ -65,8 +62,6 @@ public class Piece
     }
 
     public bool IsComplete() => Blocks.All(b => b.State == State.Completed);
-
-    public int Rarity => AvailableOnPeers.Count;
 
     public void SaveBlock(int offset, byte[] data)
     {
@@ -99,6 +94,7 @@ public class PieceManager
 {
     private readonly Piece[] _pieces;
     private readonly RequestsRegister _requests;
+    private readonly int[] _availability;
 
     public PieceManager(TorrentInfo torrent, RequestsRegister? requests = null)
     {
@@ -106,6 +102,7 @@ public class PieceManager
 
         int totalPieces = torrent.PieceCount;
         _pieces = new Piece[totalPieces];
+        _availability = new int[totalPieces];
 
         ReadOnlySpan<byte> allHashes = torrent.Pieces.ToArray();
         for (int i = 0; i < totalPieces; i++)
@@ -120,53 +117,43 @@ public class PieceManager
         }
     }
 
-    public void RegisterPeerPiece(IPEndPoint endPoint, bool[] peerBitField)
+    public void AddAvailability(bool[] peerHas)
     {
-        foreach (var piece in _pieces)
-        {
-            if (peerBitField[piece.Index])
-            {
-                piece.AvailableOnPeers.Add(endPoint);
-            }
-        }
-
+        for (int i = 0; i < _availability.Length; i++)
+            if (peerHas[i]) _availability[i]++;
     }
 
-    public void RegisterPeerPiece(IPEndPoint endPoint, int pieceIndex)
+    public void AddAvailability(int pieceIndex) => _availability[pieceIndex]++;
+
+    public void RemoveAvailability(bool[] peerHas)
     {
-        if (pieceIndex >= 0 && pieceIndex < _pieces.Length)
-        {
-            _pieces[pieceIndex].AvailableOnPeers.Add(endPoint);
-        }
+        for (int i = 0; i < _availability.Length; i++)
+            if (peerHas[i]) _availability[i]--;
     }
 
-    public void UnregisterPeerPiece(IPEndPoint endPoint)
-    {
-        foreach (var piece in _pieces)
-            piece.AvailableOnPeers.Remove(endPoint);
-    }
+    public int AvailabilityOf(int pieceIndex) => _availability[pieceIndex];
 
     public Piece GetPiece(int index)
     {
         return _pieces[index];
     }
 
-    public Piece? GetNextPieceToDownload(IPEndPoint unchokedPeer)
+    public Piece? GetNextPieceToDownload(bool[] peerHas)
     {
 
         // Gotta finish what we started man
         var partialPieces = _pieces
-            .FirstOrDefault(p => IsPartial(p) && p.AvailableOnPeers.Contains(unchokedPeer));
+            .FirstOrDefault(p => IsPartial(p) && peerHas[p.Index]);
         if(partialPieces != null) return partialPieces;
 
         var candidatePieces = _pieces.Where(p =>
             !p.IsComplete() &&
             !IsFullyRequested(p) &&
-            p.AvailableOnPeers.Contains(unchokedPeer));
+            peerHas[p.Index]);
 
 
         var rarestPiece = candidatePieces
-            .OrderBy(p => p.Rarity)
+            .OrderBy(p => _availability[p.Index])
             .Take(10)
             .Shuffle()
             .FirstOrDefault();
@@ -178,9 +165,9 @@ public class PieceManager
         _requests.CountPeerPending(peerConnection);
 
     // Choosing the block and registering the request is a single atomic unit
-    public BlockRequest? ReserveNextBlock(PeerConnection peerConnection)
+    public BlockRequest? ReserveNextBlock(PeerConnection peerConnection, bool[] peerHas)
     {
-        var piece = GetNextPieceToDownload(peerConnection.Endpoint);
+        var piece = GetNextPieceToDownload(peerHas);
         if (piece == null) return null;
 
         var block = NextFreeBlock(piece);

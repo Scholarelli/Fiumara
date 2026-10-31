@@ -153,10 +153,11 @@ internal static class PeerMessageCodec
     }
 
     // Checks the shape and that the peer answered for our torrent.
-    // The peer id is not checked: compact tracker responses do not say which one to expect.
+    // The peer id is returned unchecked: compact tracker responses do not say which one to expect.
     internal static bool TryDecodeHandshake(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> expectedInfoHash,
-        [NotNullWhen(false)] out string? error)
+        [NotNullWhen(true)] out byte[]? peerId, [NotNullWhen(false)] out string? error)
     {
+        peerId = null;
         error = null;
 
         if (bytes.Length != HandshakeLength)
@@ -178,6 +179,7 @@ internal static class PeerMessageCodec
             return false;
         }
 
+        peerId = bytes.Slice(48, 20).ToArray();
         return true;
     }
 

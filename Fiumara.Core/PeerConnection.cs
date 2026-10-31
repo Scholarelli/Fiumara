@@ -30,14 +30,16 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
 
         _stream = _tcpClient.GetStream();
 
-        await PerformHandshakeAsync(handshakeTimeout, _cts.Token);
+        var remotePeerId = await PerformHandshakeAsync(handshakeTimeout, _cts.Token);
 
         Console.WriteLine($"Connected to peer {endpoint.Address}:{endpoint.Port}");
-        _ = Task.Run(() => ReceiveMessageAsync(_cts.Token), _cts.Token);
-        _ = Task.Run(() => WriteLoopAsync(_cts.Token), _cts.Token);
+        var token = _cts.Token;
+        _engineChannel!.TryWrite(new PeerConnected(this, remotePeerId));
+        _ = Task.Run(() => ReceiveMessageAsync(token));
+        _ = Task.Run(() => WriteLoopAsync(token), token);
     }
 
-    private async Task PerformHandshakeAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    private async Task<byte[]> PerformHandshakeAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         handshakeCts.CancelAfter(timeout);
@@ -48,10 +50,10 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         var responseBuffer = new byte[PeerMessageCodec.HandshakeLength];
         await _stream.ReadExactlyAsync(responseBuffer, handshakeCts.Token);
 
-        if (!PeerMessageCodec.TryDecodeHandshake(responseBuffer, infoHash, out var error))
+        if (!PeerMessageCodec.TryDecodeHandshake(responseBuffer, infoHash, out var remotePeerId, out var error))
             throw new InvalidDataException($"Invalid handshake from peer: {error}");
 
-
+        return remotePeerId;
     }
 
     private async Task ReceiveMessageAsync(CancellationToken cancellationToken)
@@ -59,6 +61,7 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         try
         {
             var lengthBuffer = new byte[4];
+            var receivedAnyMessage = false;
             while (!cancellationToken.IsCancellationRequested && _stream is { CanRead: true })
             {
                 await _stream.ReadExactlyAsync(lengthBuffer, cancellationToken);
@@ -84,6 +87,14 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
                     return;
                 }
 
+                if (decodedMessage is PeerMessage.Bitfield && receivedAnyMessage)
+                {
+                    Console.WriteLine($"[{Endpoint}] Bitfield after other messages. Disconnecting.");
+                    Disconnect();
+                    return;
+                }
+                receivedAnyMessage = true;
+
                 EngineEvent? engineEvent = decodedMessage switch
                 {
                     PeerMessage.Choke => new ChokeStateChanged(this, true),
@@ -108,6 +119,9 @@ public class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string peerId,
         catch (IOException e)
         {
             Console.WriteLine($"[Peer Dropped] {Endpoint} connection lost: {e.Message}");
+        }
+        catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
+        {
         }
         catch (Exception e)
         {

@@ -7,6 +7,7 @@ public record Tick() : EngineEvent;
 
 public abstract record PeerEvent(PeerConnection Peer) : EngineEvent;
 
+public record PeerConnected(PeerConnection Peer, byte[] RemotePeerId) : PeerEvent(Peer);
 public record BitfieldReceived(PeerConnection Peer, bool[] BitField) : PeerEvent(Peer);
 public record HaveReceived(PeerConnection Peer, int PieceIndex) : PeerEvent(Peer);
 public record ChokeStateChanged(PeerConnection Peer, bool IsChoked) : PeerEvent(Peer);

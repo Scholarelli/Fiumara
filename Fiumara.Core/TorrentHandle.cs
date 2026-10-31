@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
 using Fiumara.Core.Protocol;
@@ -51,10 +52,10 @@ public class TorrentHandle
     {
         var trackerResponse = await _trackerClient.GetPeersAsync(_torrent);
         trackerResponse.ForEach(endpoint => _swarm.AddEndpoint(endpoint));
+        _swarm.ConnectUpTo(_options.MaxPeers);
 
         _eventLoop = Task.Run(RunEventLoopAsync);
         _ticker = RunTickerAsync();
-        _swarm.ConnectUpTo(_options.MaxPeers);
     }
 
 
@@ -85,10 +86,10 @@ public class TorrentHandle
         }
     }
 
-    private void HandlePeerDisconnect(PeerConnection deadPeer)
+    private void HandlePeerDisconnect(PeerConnection deadPeer, PeerState state)
     {
         _pieceManager.ReleasePeerRequests(deadPeer);
-        _pieceManager.UnregisterPeerPiece(deadPeer.Endpoint);
+        _pieceManager.RemoveAvailability(state.Has);
         _swarm.OnPeerDisconnected(deadPeer);
     }
 
@@ -145,17 +146,31 @@ public class TorrentHandle
     private void HandleTick()
     {
         _pieceManager.RemoveExpiredRequests();
+        AssertAvailability();
         foreach (var (peer, state) in _swarm.ActivePeers)
         {
-            EvaluatePeer(peer);
+            EvaluatePeer(peer, state);
             FillPeerPipeline(peer, state);
         }
+    }
+
+    [Conditional("DEBUG")]
+    private void AssertAvailability()
+    {
+        var peers = _swarm.ActivePeers;
+        for (var i = 0; i < _torrent.PieceCount; i++)
+            Debug.Assert(_pieceManager.AvailabilityOf(i) == peers.Count(p => p.State.Has[i]),
+                $"Availability of piece {i} does not match the bitfields of the active peers.");
     }
 
     private async Task HandlePeerEventAsync(PeerEvent peerEvent, PeerState state)
     {
         switch (peerEvent)
         {
+            case PeerConnected c:
+                if (!_swarm.TryAdmit(c.Peer, c.RemotePeerId))
+                    HandlePeerDisconnect(c.Peer, state);
+                break;
             case ChokeStateChanged c:
                 state.PeerChoking = c.IsChoked;
                 _logger.LogInformation("[{Endpoint}][CHOKE] Choke state: {State}", c.Peer.Endpoint,
@@ -165,21 +180,25 @@ public class TorrentHandle
                     _pieceManager.ReleasePeerRequests(c.Peer);
                     break;
                 }
-                EvaluatePeer(c.Peer);
+                EvaluatePeer(c.Peer, state);
                 FillPeerPipeline(c.Peer, state);
                 break;
             case BitfieldReceived b:
-                _pieceManager.RegisterPeerPiece(b.Peer.Endpoint, b.BitField);
+                _pieceManager.RemoveAvailability(state.Has);
                 state.Has = b.BitField;
-                EvaluatePeer(b.Peer);
+                _pieceManager.AddAvailability(b.BitField);
+                EvaluatePeer(b.Peer, state);
                 break;
             case HaveReceived h:
-                _pieceManager.RegisterPeerPiece(h.Peer.Endpoint, h.PieceIndex);
-                state.Has[h.PieceIndex] = true;
-                EvaluatePeer(h.Peer);
+                if (!state.Has[h.PieceIndex])
+                {
+                    state.Has[h.PieceIndex] = true;
+                    _pieceManager.AddAvailability(h.PieceIndex);
+                }
+                EvaluatePeer(h.Peer, state);
                 break;
             case PeerDisconnected d:
-                HandlePeerDisconnect(d.Peer);
+                HandlePeerDisconnect(d.Peer, state);
                 break;
             case BlockReceived b:
                 await HandleBlockReceived(b);
@@ -197,8 +216,8 @@ public class TorrentHandle
         }
     }
 
-    private void EvaluatePeer(PeerConnection peer) =>
-        _swarm.SetInterest(peer, _pieceManager.GetNextPieceToDownload(peer.Endpoint) != null);
+    private void EvaluatePeer(PeerConnection peer, PeerState state) =>
+        _swarm.SetInterest(peer, _pieceManager.GetNextPieceToDownload(state.Has) != null);
 
     private void FillPeerPipeline(PeerConnection peer, PeerState state)
     {
@@ -209,7 +228,7 @@ public class TorrentHandle
 
         while (_pieceManager.CountPendingRequests(peer) < maxPipelineSize)
         {
-            if (_pieceManager.ReserveNextBlock(peer) is not { } request) break;
+            if (_pieceManager.ReserveNextBlock(peer, state.Has) is not { } request) break;
 
             peer.RequestBlock(request.PieceIndex, request.Offset, request.Length);
 
