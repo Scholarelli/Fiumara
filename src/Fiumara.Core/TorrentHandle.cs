@@ -109,7 +109,10 @@ public partial class TorrentHandle
                 var piece = _pieceManager.GetPiece(b.PieceIndex);
                 Log.PieceVerified(_logger, piece.Index);
                 await _storage.WritePieceAsync(piece.Index, piece.Buffer);
+                _pieceManager.OnPieceWritten(piece.Index);
                 _swarm.BroadcastHave(piece.Index);
+                if (_pieceManager.HasAllPieces)
+                    Log.DownloadComplete(_logger, _torrent.PieceCount, _options.DownloadPath);
                 break;
             case BlockOutcome.PieceCorrupted:
                 Log.PieceCorrupted(_logger, b.PieceIndex);
@@ -147,6 +150,7 @@ public partial class TorrentHandle
             _swarm.Snub(peer);
         _swarm.DisconnectExpiredSnubs();
         AssertAvailability();
+        _pieceManager.AssertPieceStates();
         foreach (var (peer, state) in _swarm.ActivePeers)
         {
             EvaluatePeer(peer, state);
@@ -280,5 +284,8 @@ public partial class TorrentHandle
         [LoggerMessage(1013, LogLevel.Trace,
             "Requesting the block at offset {Offset} of piece {PieceIndex} ({Length} bytes) from peer {Endpoint}.")]
         public static partial void BlockRequested(ILogger logger, IPEndPoint endpoint, int pieceIndex, int offset, int length);
+
+        [LoggerMessage(1014, LogLevel.Information, "Download complete: all {PieceCount} pieces are written to {Path}.")]
+        public static partial void DownloadComplete(ILogger logger, int pieceCount, string path);
     }
 }

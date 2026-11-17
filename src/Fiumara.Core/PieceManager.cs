@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using BencodeNET.Torrents;
 
@@ -16,9 +17,8 @@ public class Block
 public enum PieceState
 {
     Missing,
-    Pending,
-    Completed
-};
+    Have
+}
 
 public readonly record struct BlockRequest(int PieceIndex, int Offset, int Length);
 
@@ -95,6 +95,8 @@ public class PieceManager
     private readonly Piece[] _pieces;
     private readonly RequestsRegister _requests;
     private readonly int[] _availability;
+    private readonly PieceState[] _states;
+    private int _haveCount;
 
     public PieceManager(TorrentInfo torrent, RequestsRegister? requests = null)
     {
@@ -103,6 +105,7 @@ public class PieceManager
         int totalPieces = torrent.PieceCount;
         _pieces = new Piece[totalPieces];
         _availability = new int[totalPieces];
+        _states = new PieceState[totalPieces];
 
         ReadOnlySpan<byte> allHashes = torrent.Pieces.ToArray();
         for (int i = 0; i < totalPieces; i++)
@@ -136,6 +139,31 @@ public class PieceManager
     public Piece GetPiece(int index)
     {
         return _pieces[index];
+    }
+
+    public bool Has(int pieceIndex) => _states[pieceIndex] == PieceState.Have;
+
+    public bool HasAllPieces => _haveCount == _pieces.Length;
+
+    public void OnPieceWritten(int pieceIndex)
+    {
+        if (Has(pieceIndex))
+            throw new InvalidOperationException($"Piece {pieceIndex} was written twice.");
+        if (!_pieces[pieceIndex].IsComplete())
+            throw new InvalidOperationException($"Piece {pieceIndex} was written before all of its blocks arrived.");
+
+        _states[pieceIndex] = PieceState.Have;
+        _haveCount++;
+    }
+
+    [Conditional("DEBUG")]
+    internal void AssertPieceStates()
+    {
+        Debug.Assert(_haveCount == _states.Count(s => s == PieceState.Have),
+            "The count of the pieces we have does not match their states.");
+        for (var i = 0; i < _pieces.Length; i++)
+            Debug.Assert(Has(i) == _pieces[i].IsComplete(),
+                $"Piece {i} is complete but not written, or written but not complete.");
     }
 
     public Piece? GetNextPieceToDownload(bool[] peerHas)
