@@ -2,3 +2,54 @@
 
 Eventually it'll turn into a beatiful torrent client, maybe even webclient?
 Give it some time, let it grow.
+
+## Where it stands
+
+- Downloads single-file torrents from the peers an HTTP tracker returns.
+- One event loop per torrent owns all the state; peers and the ticker talk to it through events.
+- Picks partial pieces first, then the rarest ones, and keeps a small pipeline of requests per peer.
+- Hands expired requests to other peers and stops asking peers that snub us, disconnecting them after a while.
+- Verifies every piece with SHA-1 and knows which pieces it has (verified and written to disk).
+
+## Roadmap
+
+### Now: becoming a seeder
+
+- [x] **Piece state.** Answer "do I have piece i?" and "do I have everything?".
+- [ ] **Shutdown and an explicit lifecycle.** One way to stop ticker, peers, storage and loop, used when the
+  download ends, when the host asks (`StopAsync`/`DisposeAsync`) and when the loop crashes. `Completion` means
+  "the engine stopped".
+- [ ] **Upload on the connections we already have.**
+  - Our side of the choke (`AmChoking`) and a choker written as a pure function: regular unchokes for the peers
+    that give us the most, plus an optimistic one.
+  - Send our bitfield.
+  - Serve `Request` by reading the block from disk; honour `Cancel`; drop the queue of a peer we choke.
+  - Count the bytes each peer sends and receives: the choker needs them.
+  - Release piece buffers once written.
+- [ ] **Incoming connections.** Listen on `ListenPort` and accept the inbound handshake.
+- [ ] **Resume after a restart.** Hash-check the pieces already on disk at startup.
+
+### Then: a well-behaved peer
+
+- [ ] **Interest.** Be interested in a peer when it has a piece we lack, not when the picker has a free block for it.
+- [ ] **Missing timeouts.** TCP connect, sending keep-alives, dropping silent peers, peers that choke us forever.
+- [ ] **Tracker.** Re-announce at the interval the tracker gives, report real `uploaded`/`downloaded`/`left`,
+  send the `started`/`completed`/`stopped` events.
+- [ ] **Options.** Reject a `TickPeriod` above what `PeriodicTimer` accepts.
+
+### Later: a session above the torrents
+
+- [ ] **A session** owning what is shared: the listener, the peer id (a static today), a global choker and
+  connection limits, disk I/O as an actor of its own. Shared resources get injected into `TorrentHandle`.
+- [ ] **Many torrents at once**, deciding between one loop per torrent and one per session.
+- [ ] **Progress for UIs**: an immutable snapshot with verified bytes and transfer rates.
+- [ ] **Multi-file torrents.**
+- [ ] **Web UI.**
+
+### Maybe: protocol extensions
+
+- [ ] Endgame mode.
+- [ ] Fast extension (BEP 6).
+- [ ] Magnet links and metadata exchange (BEP 9, BEP 10).
+- [ ] DHT (BEP 5) and peer exchange (BEP 11).
+- [ ] UDP trackers (BEP 15).
