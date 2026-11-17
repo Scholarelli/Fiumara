@@ -143,6 +143,9 @@ public class PieceManager
         return _pieces[index];
     }
 
+    public bool[] GetBitfield() =>
+        Array.ConvertAll(_states, state => state == PieceState.Have);
+
     public bool Has(int pieceIndex) => _states[pieceIndex] == PieceState.Have;
 
     public bool HasAllPieces => _haveCount == _pieces.Length;

@@ -136,6 +136,26 @@ internal static class PeerMessageCodec
         return true;
     }
 
+    internal static byte[] PackBitfield(bool[] pieces)
+    {
+
+        if (pieces.Length == 0)
+        {
+            throw new ArgumentException("Bitfield has no pieces.", nameof(pieces));
+        }
+
+        int expectedLength = (pieces.Length + 7) / 8;
+        var bits = new byte[expectedLength];
+
+        for (int i = 0; i < pieces.Length; i++)
+        {
+            if (pieces[i])
+                bits[i >> 3] |= (byte)(0x80 >> (i & 7));
+        }
+
+        return bits;
+    }
+
     internal static byte[] EncodeHandshake(byte[] infoHash, byte[] peerId, ulong reserved = 0)
     {
         if (infoHash.Length != 20)

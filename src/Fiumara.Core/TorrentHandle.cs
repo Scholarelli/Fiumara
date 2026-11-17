@@ -175,7 +175,12 @@ public partial class TorrentHandle
         {
             case PeerConnected c:
                 if (!_swarm.TryAdmit(c.Peer, c.RemotePeerId))
+                {
                     HandlePeerDisconnect(c.Peer, state);
+                    return;
+                }
+
+                c.Peer.SendBitfield(_pieceManager.GetBitfield());
                 break;
             case ChokeStateChanged c:
                 state.PeerChoking = c.IsChoked;

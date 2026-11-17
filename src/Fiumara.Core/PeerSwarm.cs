@@ -16,6 +16,7 @@ internal sealed class PeerState(int pieceCount)
     public byte[]? RemotePeerId { get; set; }
     public long? SnubbedSince { get; set; }
     public bool IsSnubbed => SnubbedSince.HasValue;
+    public bool IsAdmitted => RemotePeerId is not null;
 }
 
 internal sealed record ActivePeer(PeerConnection Connection, PeerState State);
@@ -178,7 +179,7 @@ internal partial class PeerSwarm
         var sent = 0;
         foreach (var (peer, state) in _activePeers)
         {
-            if (state.Has[pieceIndex]) continue;
+            if (state.Has[pieceIndex] || !state.IsAdmitted) continue;
             peer.SendHave(pieceIndex);
             sent++;
         }
