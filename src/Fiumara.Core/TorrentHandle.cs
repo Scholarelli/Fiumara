@@ -108,7 +108,9 @@ public partial class TorrentHandle
             case BlockOutcome.PieceVerified:
                 var piece = _pieceManager.GetPiece(b.PieceIndex);
                 Log.PieceVerified(_logger, piece.Index);
-                await _storage.WritePieceAsync(piece.Index, piece.Buffer);
+                var data = piece.Buffer
+                           ?? throw new InvalidOperationException($"Piece {piece.Index} has no buffer to write.");
+                await _storage.WritePieceAsync(piece.Index, data);
                 _pieceManager.OnPieceWritten(piece.Index);
                 _swarm.BroadcastHave(piece.Index);
                 if (_pieceManager.HasAllPieces)

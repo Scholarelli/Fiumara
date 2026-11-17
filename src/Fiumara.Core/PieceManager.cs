@@ -61,6 +61,8 @@ public class Piece
         Buffer ??= new byte[(int)Blocks.Sum(b => b.Size)];
     }
 
+    public void ReleaseBuffer() => Buffer = null;
+
     public bool IsComplete() => Blocks.All(b => b.State == State.Completed);
 
     public void SaveBlock(int offset, byte[] data)
@@ -154,6 +156,7 @@ public class PieceManager
 
         _states[pieceIndex] = PieceState.Have;
         _haveCount++;
+        _pieces[pieceIndex].ReleaseBuffer();
     }
 
     [Conditional("DEBUG")]
@@ -162,8 +165,11 @@ public class PieceManager
         Debug.Assert(_haveCount == _states.Count(s => s == PieceState.Have),
             "The count of the pieces we have does not match their states.");
         for (var i = 0; i < _pieces.Length; i++)
+        {
             Debug.Assert(Has(i) == _pieces[i].IsComplete(),
                 $"Piece {i} is complete but not written, or written but not complete.");
+            Debug.Assert(!Has(i) || _pieces[i].Buffer is null, $"Piece {i} is written but still holds its buffer.");
+        }
     }
 
     public Piece? GetNextPieceToDownload(bool[] peerHas)

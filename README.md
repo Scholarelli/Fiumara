@@ -6,10 +6,11 @@ Give it some time, let it grow.
 ## Where it stands
 
 - Downloads single-file torrents from the peers an HTTP tracker returns.
-- One event loop per torrent owns all the state; peers and the ticker talk to it through events.
+- One event loop per torrent owns all the state with actors talking to it through events.
 - Picks partial pieces first, then the rarest ones, and keeps a small pipeline of requests per peer.
 - Hands expired requests to other peers and stops asking peers that snub us, disconnecting them after a while.
 - Verifies every piece with SHA-1 and knows which pieces it has (verified and written to disk).
+- Keeps in memory only the pieces in progress: a piece's buffer is released once it is on disk.
 
 ## Roadmap
 
@@ -25,7 +26,6 @@ Give it some time, let it grow.
   - Send our bitfield.
   - Serve `Request` by reading the block from disk; honour `Cancel`; drop the queue of a peer we choke.
   - Count the bytes each peer sends and receives: the choker needs them.
-  - Release piece buffers once written.
 - [ ] **Incoming connections.** Listen on `ListenPort` and accept the inbound handshake.
 - [ ] **Resume after a restart.** Hash-check the pieces already on disk at startup.
 
@@ -44,6 +44,8 @@ Give it some time, let it grow.
 - [ ] **Many torrents at once**, deciding between one loop per torrent and one per session.
 - [ ] **Progress for UIs**: an immutable snapshot with verified bytes and transfer rates.
 - [ ] **Multi-file torrents.**
+- [ ] **Disk cache** to avoid reading the same piece from disk for multiple peers.
+- [ ] **Optimization** to reduce allocations.
 - [ ] **Web UI.**
 
 ### Maybe: protocol extensions
