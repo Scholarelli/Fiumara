@@ -151,6 +151,7 @@ public partial class TorrentHandle
         foreach (var (_, peer) in _pieceManager.RemoveExpiredRequests())
             _swarm.Snub(peer);
         _swarm.DisconnectExpiredSnubs();
+        _swarm.RechokeIfDue();
         AssertAvailability();
         _pieceManager.AssertPieceStates();
         foreach (var (peer, state) in _swarm.ActivePeers)
@@ -212,6 +213,7 @@ public partial class TorrentHandle
                 HandlePeerDisconnect(d.Peer, state);
                 break;
             case BlockReceived b:
+                state.BytesReceived += b.Data.Length;
                 await HandleBlockReceived(b);
                 FillPeerPipeline(b.Peer, state);
                 break;

@@ -12,6 +12,9 @@ internal sealed class PeerState(int pieceCount)
     public bool PeerChoking { get; set; } = true; // il peer ci sta chokando
     public bool PeerInterested { get; set; } // il peer è interessato a noi
     public bool AmInterested { get; set; } // noi siamo interessati al peer
+    public bool AmChoking { get; set; } = true;
+    public long BytesReceived { get; set; }
+    public long BytesReceivedAtRechoke { get; set; }
     public bool[] Has { get; set; } = new bool[pieceCount];
     public byte[]? RemotePeerId { get; set; }
     public long? SnubbedSince { get; set; }
@@ -34,6 +37,9 @@ internal partial class PeerSwarm
     private readonly ILoggerFactory _loggers;
     private readonly ILogger<PeerSwarm> _logger;
     private readonly TimeProvider _timeProvider;
+    private long? _lastRechoke;
+    private long? _lastOptimisticRotation;
+    private PeerConnection? _optimistic;
 
 
     internal PeerSwarm(IReadOnlyList<byte> infoHash, int pieceCount, ChannelWriter<EngineEvent> events,
@@ -196,6 +202,46 @@ internal partial class PeerSwarm
         peer.SendInterested(interested);
     }
 
+    public void RechokeIfDue()
+    {
+        var now = _timeProvider.GetTimestamp();
+        if (_lastRechoke is not null && _timeProvider.GetElapsedTime(_lastRechoke.Value, now) < _options.RechokeInterval)
+            return;
+
+        var rotate = _lastOptimisticRotation is null
+                     || _timeProvider.GetElapsedTime(_lastOptimisticRotation.Value, now) >= _options.OptimisticUnchokeInterval;
+        var candidates = _activePeers
+            .Where(peer => peer.Value.IsAdmitted)
+            .Select(peer => new ChokeCandidate(peer.Key, peer.Value.PeerInterested,
+                peer.Value.BytesReceived - peer.Value.BytesReceivedAtRechoke))
+            .ToList();
+        var decision = Choker.Decide(candidates, _options.UnchokeSlots, _optimistic, rotate, Random.Shared);
+
+        if (rotate || !ReferenceEquals(decision.Optimistic, _optimistic))
+            _lastOptimisticRotation = now;
+        _optimistic = decision.Optimistic;
+        _lastRechoke = now;
+
+        foreach (var (peer, state) in _activePeers)
+        {
+            state.BytesReceivedAtRechoke = state.BytesReceived;
+            SetChoking(peer, state, !decision.Unchoked.Contains(peer));
+        }
+    }
+
+    private void SetChoking(PeerConnection peer, PeerState state, bool choking)
+    {
+        if (state.AmChoking == choking)
+            return;
+
+        state.AmChoking = choking;
+        peer.SendChoke(choking);
+        if (choking)
+            Log.PeerChoked(_logger, peer.Endpoint);
+        else
+            Log.PeerUnchoked(_logger, peer.Endpoint, ReferenceEquals(peer, _optimistic));
+    }
+
     private static partial class Log
     {
         [LoggerMessage(2001, LogLevel.Debug, "Peer {Endpoint} removed from active peers.")]
@@ -236,5 +282,11 @@ internal partial class PeerSwarm
         [LoggerMessage(2012, LogLevel.Warning,
             "Peer {Endpoint} has been snubbing us for more than {Timeout}. Disconnecting.")]
         public static partial void SnubTimedOut(ILogger logger, IPEndPoint endpoint, TimeSpan timeout);
+
+        [LoggerMessage(2013, LogLevel.Debug, "Unchoking peer {Endpoint} (optimistic: {Optimistic}).")]
+        public static partial void PeerUnchoked(ILogger logger, IPEndPoint endpoint, bool optimistic);
+
+        [LoggerMessage(2014, LogLevel.Debug, "Choking peer {Endpoint}.")]
+        public static partial void PeerChoked(ILogger logger, IPEndPoint endpoint);
     }
 }

@@ -166,6 +166,8 @@ public partial class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string
     public void SendInterested(bool interested) =>
         Send(interested ? new PeerMessage.Interested() : new PeerMessage.NotInterested());
 
+    public void SendChoke(bool choke) => Send(choke ? new PeerMessage.Choke() : new PeerMessage.Unchoke());
+
     public void SendBitfield(bool[] pieces) => Send(new PeerMessage.Bitfield(PeerMessageCodec.PackBitfield(pieces)));
 
     private void Send(PeerMessage message) => _outbox.Writer.TryWrite(message);
