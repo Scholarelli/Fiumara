@@ -176,6 +176,15 @@ internal partial class PeerSwarm
         return true;
     }
 
+    public void DisconnectAll()
+    {
+        foreach (var peer in _activePeers.Keys)
+            peer.Dispose();
+        Log.AllPeersClosed(_logger, _activePeers.Count);
+        _activePeers.Clear();
+        _waitingRoom.Clear();
+    }
+
     public void OnPeerDisconnected(PeerConnection peer)
     {
         peer.Dispose();
@@ -296,5 +305,8 @@ internal partial class PeerSwarm
 
         [LoggerMessage(2014, LogLevel.Debug, "Choking peer {Endpoint}.")]
         public static partial void PeerChoked(ILogger logger, IPEndPoint endpoint);
+
+        [LoggerMessage(2015, LogLevel.Debug, "Closed the connections to {Count} peers.")]
+        public static partial void AllPeersClosed(ILogger logger, int count);
     }
 }

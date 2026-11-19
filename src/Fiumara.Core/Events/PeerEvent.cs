@@ -4,6 +4,8 @@ namespace Fiumara.Core.Events;
 public abstract record EngineEvent;
 
 public record Tick() : EngineEvent;
+internal sealed record StopRequested : EngineEvent;
+internal sealed record TickerFailed(Exception Error) : EngineEvent;
 
 public abstract record PeerEvent(PeerConnection Peer) : EngineEvent;
 

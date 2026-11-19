@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Fiumara.Core.Events;
 using Fiumara.Core.Protocol;
@@ -9,7 +10,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fiumara.Core;
 
-public partial class TorrentHandle
+public partial class TorrentHandle : IAsyncDisposable
 {
     private readonly Channel<EngineEvent> _eventChannel = Channel.CreateUnbounded<EngineEvent>();
     private readonly PieceManager _pieceManager;
@@ -24,10 +25,13 @@ public partial class TorrentHandle
     private readonly ILogger<TorrentHandle> _logger;
     private readonly FiumaraOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly CancellationTokenSource _stopping = new();
     private Task? _eventLoop;
-    private Task? _completion;
+    private volatile TorrentState _state = TorrentState.NotStarted;
 
-    public Task Completion => _completion
+    public TorrentState State => _state;
+
+    public Task Completion => _eventLoop
                               ?? throw new InvalidOperationException("TorrentHandle has not been started.");
 
     public TorrentHandle(TorrentInfo torrent, ILoggerFactory? loggerFactory = null, FiumaraOptions? options = null,
@@ -53,41 +57,79 @@ public partial class TorrentHandle
 
     public async Task StartAsync()
     {
+        if (_state != TorrentState.NotStarted)
+            throw new InvalidOperationException("TorrentHandle can be started only once.");
+
         var trackerResponse = await _trackerClient.GetPeersAsync(_torrent);
         trackerResponse.ForEach(endpoint => _swarm.AddEndpoint(endpoint));
         _swarm.ConnectUpTo(_options.MaxPeers);
 
+        _state = TorrentState.Running;
+        _ticker = RunTickerAsync(_stopping.Token);
         _eventLoop = Task.Run(RunEventLoopAsync);
-        _ticker = RunTickerAsync();
-        _completion = Task.WhenAny(_eventLoop, _ticker).Unwrap();
     }
 
+    public async Task StopAsync()
+    {
+        if (_eventLoop is null)
+            return;
 
-    private async Task RunTickerAsync()
+        _eventChannel.Writer.TryWrite(new StopRequested());
+        await _eventLoop.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
+        GC.SuppressFinalize(this);
+    }
+
+    private async Task RunTickerAsync(CancellationToken stopping)
     {
         try
         {
-            await foreach (var tick in Ticker.StartAsync(_options.TickPeriod, _timeProvider))
+            await foreach (var tick in Ticker.StartAsync(_options.TickPeriod, _timeProvider, stopping))
                 _eventChannel.Writer.TryWrite(tick);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
             Log.TickerCrashed(_logger, ex);
-            throw;
+            _eventChannel.Writer.TryWrite(new TickerFailed(ex));
         }
     }
 
     private async Task RunEventLoopAsync()
     {
+        var outcome = TorrentState.Stopped;
         try
         {
             await ProcessEventsAsync();
         }
         catch (Exception ex)
         {
-            Log.EventLoopCrashed(_logger, ex);
+            outcome = TorrentState.Failed;
+            Log.EngineFailed(_logger, ex);
             throw;
         }
+        finally
+        {
+            await ShutDownAsync();
+            _state = outcome;
+            Log.EngineStopped(_logger, outcome);
+        }
+    }
+
+    private async Task ShutDownAsync()
+    {
+        _eventChannel.Writer.TryComplete();
+        await _stopping.CancelAsync();
+        if (_ticker is not null)
+            await _ticker;
+        _swarm.DisconnectAll();
+        _storage.Dispose();
     }
 
     private void HandlePeerDisconnect(PeerConnection deadPeer, PeerState state)
@@ -134,6 +176,11 @@ public partial class TorrentHandle
         {
             switch (engineEvent)
             {
+                case StopRequested:
+                    return;
+                case TickerFailed failed:
+                    ExceptionDispatchInfo.Throw(failed.Error);
+                    break;
                 case Tick:
                     HandleTick();
                     break;
@@ -265,8 +312,8 @@ public partial class TorrentHandle
         [LoggerMessage(1001, LogLevel.Error, "The ticker crashed.")]
         public static partial void TickerCrashed(ILogger logger, Exception exception);
 
-        [LoggerMessage(1002, LogLevel.Error, "The event loop crashed.")]
-        public static partial void EventLoopCrashed(ILogger logger, Exception exception);
+        [LoggerMessage(1002, LogLevel.Error, "The engine stopped because of an error.")]
+        public static partial void EngineFailed(ILogger logger, Exception exception);
 
         [LoggerMessage(1003, LogLevel.Trace,
             "Block at offset {Offset} of piece {PieceIndex} ({Length} bytes) from peer {Endpoint}: {Outcome}.")]
@@ -307,5 +354,8 @@ public partial class TorrentHandle
 
         [LoggerMessage(1014, LogLevel.Information, "Download complete: all {PieceCount} pieces are written to {Path}.")]
         public static partial void DownloadComplete(ILogger logger, int pieceCount, string path);
+
+        [LoggerMessage(1015, LogLevel.Information, "The engine has stopped: {State}.")]
+        public static partial void EngineStopped(ILogger logger, TorrentState state);
     }
 }
