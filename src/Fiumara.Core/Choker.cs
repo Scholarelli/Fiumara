@@ -1,6 +1,6 @@
 namespace Fiumara.Core;
 
-internal readonly record struct ChokeCandidate(PeerConnection Peer, bool Interested, long BytesReceived);
+internal readonly record struct ChokeCandidate(PeerConnection Peer, bool Interested, bool Snubbing, long BytesReceived);
 
 internal sealed record ChokeDecision(IReadOnlySet<PeerConnection> Unchoked, PeerConnection? Optimistic);
 
@@ -10,7 +10,8 @@ internal static class Choker
         PeerConnection? optimistic, bool rotateOptimistic, Random random)
     {
         var interested = candidates.Where(c => c.Interested).ToList();
-        var regular = interested.OrderByDescending(c => c.BytesReceived).Take(slots - 1).Select(c => c.Peer).ToList();
+        var regular = interested.Where(c => !c.Snubbing).OrderByDescending(c => c.BytesReceived).Take(slots - 1)
+            .Select(c => c.Peer).ToList();
         var others = interested.Select(c => c.Peer).Where(peer => !regular.Contains(peer)).ToList();
 
         if (rotateOptimistic || optimistic is null || !others.Contains(optimistic))

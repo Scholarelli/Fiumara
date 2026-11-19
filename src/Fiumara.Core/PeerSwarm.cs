@@ -212,7 +212,7 @@ internal partial class PeerSwarm
                      || _timeProvider.GetElapsedTime(_lastOptimisticRotation.Value, now) >= _options.OptimisticUnchokeInterval;
         var candidates = _activePeers
             .Where(peer => peer.Value.IsAdmitted)
-            .Select(peer => new ChokeCandidate(peer.Key, peer.Value.PeerInterested,
+            .Select(peer => new ChokeCandidate(peer.Key, peer.Value.PeerInterested, peer.Value.IsSnubbed,
                 peer.Value.BytesReceived - peer.Value.BytesReceivedAtRechoke))
             .ToList();
         var decision = Choker.Decide(candidates, _options.UnchokeSlots, _optimistic, rotate, Random.Shared);
