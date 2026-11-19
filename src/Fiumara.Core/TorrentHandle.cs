@@ -190,6 +190,7 @@ public partial class TorrentHandle
                 {
                     Log.Choked(_logger, c.Peer.Endpoint);
                     _pieceManager.ReleasePeerRequests(c.Peer);
+                    _swarm.Unsnub(c.Peer);
                     break;
                 }
                 Log.Unchoked(_logger, c.Peer.Endpoint);

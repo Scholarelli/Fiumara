@@ -203,6 +203,8 @@ internal partial class PeerSwarm
 
         state.AmInterested = interested;
         peer.SendInterested(interested);
+        if (!interested)
+            Unsnub(peer);
     }
 
     public void RechokeIfDue()
@@ -282,7 +284,7 @@ internal partial class PeerSwarm
             "Peer {Endpoint} is snubbing us: no more blocks will be requested from it.")]
         public static partial void PeerSnubbed(ILogger logger, IPEndPoint endpoint);
 
-        [LoggerMessage(2011, LogLevel.Information, "Peer {Endpoint} sent a block again and is no longer snubbed.")]
+        [LoggerMessage(2011, LogLevel.Information, "Peer {Endpoint} is no longer snubbing us.")]
         public static partial void PeerUnsnubbed(ILogger logger, IPEndPoint endpoint);
 
         [LoggerMessage(2012, LogLevel.Warning,
