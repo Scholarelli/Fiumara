@@ -241,7 +241,7 @@ public partial class TorrentHandle
     }
 
     private void EvaluatePeer(PeerConnection peer, PeerState state) =>
-        _swarm.SetInterest(peer, _pieceManager.GetNextPieceToDownload(state.Has) != null);
+        _swarm.SetInterest(peer, _pieceManager.IsMissingAnyOf(state.Has));
 
     private void FillPeerPipeline(PeerConnection peer, PeerState state)
     {

@@ -154,6 +154,14 @@ public class PieceManager
 
     public bool HasAllPieces => _haveCount == _pieces.Length;
 
+    public bool IsMissingAnyOf(bool[] pieces)
+    {
+        for (var i = 0; i < _states.Length; i++)
+            if (pieces[i] && _states[i] != PieceState.Have)
+                return true;
+        return false;
+    }
+
     public void OnPieceWritten(int pieceIndex)
     {
         if (Has(pieceIndex))
