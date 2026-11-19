@@ -11,6 +11,8 @@ Give it some time, let it grow.
 - Hands expired requests to other peers and stops asking peers that snub us, disconnecting them after a while.
 - Verifies every piece with SHA-1 and knows which pieces it has (verified and written to disk).
 - Keeps in memory only the pieces in progress: a piece's buffer is released once it is on disk.
+- Uploads too: sends its bitfield, unchokes the interested peers that give it the most plus an optimistic one (never
+  giving a regular slot to a peer that snubs it), and serves their requests by reading the blocks back from disk.
 
 ## Roadmap
 
@@ -20,18 +22,16 @@ Give it some time, let it grow.
 - [ ] **Shutdown and an explicit lifecycle.** One way to stop ticker, peers, storage and loop, used when the
   download ends, when the host asks (`StopAsync`/`DisposeAsync`) and when the loop crashes. `Completion` means
   "the engine stopped".
-- [ ] **Upload on the connections we already have.**
-  - Our side of the choke (`AmChoking`) and a choker written as a pure function: regular unchokes for the peers
-    that give us the most, plus an optimistic one.
-  - Send our bitfield.
-  - Serve `Request` by reading the block from disk; honour `Cancel`; drop the queue of a peer we choke.
-  - Count the bytes each peer sends and receives: the choker needs them.
+- [x] **Upload on the connections we already have.** Our bitfield, a choker written as a pure function, and
+  requests served from disk, with `Cancel` honoured and the queue of a peer we choke dropped.
 - [ ] **Incoming connections.** Listen on `ListenPort` and accept the inbound handshake.
 - [ ] **Resume after a restart.** Hash-check the pieces already on disk at startup.
 
 ### Then: a well-behaved peer
 
 - [ ] **Interest.** Be interested in a peer when it has a piece we lack, not when the picker has a free block for it.
+- [ ] **Choking, the finer points.** Once we have everything, rank peers by what we send them (or take turns);
+  unchoke at once a peer that becomes interested while a slot is free; favour newcomers for the optimistic slot.
 - [ ] **Missing timeouts.** TCP connect, sending keep-alives, dropping silent peers, peers that choke us forever.
 - [ ] **Tracker.** Re-announce at the interval the tracker gives, report real `uploaded`/`downloaded`/`left`,
   send the `started`/`completed`/`stopped` events.
