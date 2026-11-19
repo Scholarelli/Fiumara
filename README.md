@@ -29,7 +29,7 @@ Give it some time, let it grow.
 
 ### Then: a well-behaved peer
 
-- [ ] **Interest.** Be interested in a peer when it has a piece we lack, not when the picker has a free block for it.
+- [x] **Interest.** Be interested in a peer when it has a piece we lack, not when the picker has a free block for it.
 - [ ] **Choking, the finer points.** Once we have everything, rank peers by what we send them (or take turns);
   unchoke at once a peer that becomes interested while a slot is free; favour newcomers for the optimistic slot.
 - [ ] **Missing timeouts.** TCP connect, sending keep-alives, dropping silent peers, peers that choke us forever.
