@@ -29,7 +29,12 @@ class Program
             builder.SetMinimumLevel(LogLevel.Information);
         });
 
-        var engine = new TorrentHandle(parsed, loggerFactory);
+        await using var engine = new TorrentHandle(parsed, loggerFactory);
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            _ = engine.StopAsync();
+        };
         try
         {
             await engine.StartAsync();
