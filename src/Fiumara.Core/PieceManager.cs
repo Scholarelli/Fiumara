@@ -34,6 +34,7 @@ public enum BlockOutcome
 public class Piece
 {
     public int Index { get; }
+    public long Size { get; }
     public byte[] ExpectedHash { get; }
 
     public Block[] Blocks { get; private set; }
@@ -43,6 +44,7 @@ public class Piece
     public Piece(int index, long pieceSize, byte[] expectedHash)
     {
         Index = index;
+        Size = pieceSize;
         ExpectedHash = expectedHash;
         const int blockSize = 16 * 1024;
         int blockCount = (int)Math.Ceiling((double) pieceSize / blockSize);
@@ -137,6 +139,8 @@ public class PieceManager
     }
 
     public int AvailabilityOf(int pieceIndex) => _availability[pieceIndex];
+
+    public int PieceCount => _pieces.Length;
 
     public Piece GetPiece(int index)
     {

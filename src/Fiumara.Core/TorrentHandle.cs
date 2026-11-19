@@ -17,6 +17,7 @@ public partial class TorrentHandle
     private readonly TrackerClient _trackerClient;
     private readonly TorrentInfo _torrent;
     private readonly PieceStorage _storage;
+    private readonly Uploader _uploader;
     private Task? _ticker;
 
     private readonly PeerSwarm _swarm;
@@ -46,7 +47,7 @@ public partial class TorrentHandle
 
         _pieceManager = new PieceManager(_torrent, new RequestsRegister(_options.RequestTimeout, _timeProvider));
         _storage = new PieceStorage(_options.DownloadPath, _torrent.PieceLength);
-
+        _uploader = new Uploader(_pieceManager, _storage, loggers.CreateLogger<Uploader>());
     }
 
 
@@ -216,6 +217,15 @@ public partial class TorrentHandle
                 state.BytesReceived += b.Data.Length;
                 await HandleBlockReceived(b);
                 FillPeerPipeline(b.Peer, state);
+                break;
+            case RequestReceived r:
+                await _uploader.OnRequestAsync(r.Peer, state, r.Request);
+                break;
+            case CancelReceived c:
+                _uploader.OnCancel(state, c.Request);
+                break;
+            case BlockSent s:
+                await _uploader.OnBlockSentAsync(s.Peer, state, s.Length);
                 break;
             case InterestedStateChanged i:
                 state.PeerInterested = i.IsInterested;

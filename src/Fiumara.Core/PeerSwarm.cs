@@ -15,6 +15,9 @@ internal sealed class PeerState(int pieceCount)
     public bool AmChoking { get; set; } = true;
     public long BytesReceived { get; set; }
     public long BytesReceivedAtRechoke { get; set; }
+    public long BytesSent { get; set; }
+    public List<BlockRequest> IncomingRequests { get; } = [];
+    public int BlocksInFlight { get; set; }
     public bool[] Has { get; set; } = new bool[pieceCount];
     public byte[]? RemotePeerId { get; set; }
     public long? SnubbedSince { get; set; }
@@ -237,7 +240,10 @@ internal partial class PeerSwarm
         state.AmChoking = choking;
         peer.SendChoke(choking);
         if (choking)
+        {
+            state.IncomingRequests.Clear();
             Log.PeerChoked(_logger, peer.Endpoint);
+        }
         else
             Log.PeerUnchoked(_logger, peer.Endpoint, ReferenceEquals(peer, _optimistic));
     }

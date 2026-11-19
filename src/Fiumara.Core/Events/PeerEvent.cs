@@ -14,3 +14,6 @@ public record ChokeStateChanged(PeerConnection Peer, bool IsChoked) : PeerEvent(
 public record BlockReceived(PeerConnection Peer, int PieceIndex, int Offset, byte[] Data) : PeerEvent(Peer);
 public record PeerDisconnected(PeerConnection Peer) : PeerEvent(Peer);
 public record InterestedStateChanged(PeerConnection Peer, bool IsInterested) : PeerEvent(Peer);
+public record RequestReceived(PeerConnection Peer, BlockRequest Request) : PeerEvent(Peer);
+public record CancelReceived(PeerConnection Peer, BlockRequest Request) : PeerEvent(Peer);
+public record BlockSent(PeerConnection Peer, int Length) : PeerEvent(Peer);

@@ -105,7 +105,11 @@ public partial class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string
                     PeerMessage.Have have => OnHave(have.PieceIndex),
                     PeerMessage.Bitfield bitfield => OnBitfield(bitfield.Bits),
                     PeerMessage.Piece piece => new BlockReceived(this, piece.PieceIndex, piece.Offset, piece.Data),
-                    PeerMessage.KeepAlive or PeerMessage.Unknown or PeerMessage.Request or PeerMessage.Cancel => null,
+                    PeerMessage.Request request =>
+                        new RequestReceived(this, new BlockRequest(request.PieceIndex, request.Offset, request.Length)),
+                    PeerMessage.Cancel cancel =>
+                        new CancelReceived(this, new BlockRequest(cancel.PieceIndex, cancel.Offset, cancel.Length)),
+                    PeerMessage.KeepAlive or PeerMessage.Unknown => null,
                     _ => throw new UnreachableException($"Unhandled message {decodedMessage}")
                 };
 
@@ -170,6 +174,8 @@ public partial class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string
 
     public void SendBitfield(bool[] pieces) => Send(new PeerMessage.Bitfield(PeerMessageCodec.PackBitfield(pieces)));
 
+    public void SendPiece(int pieceIndex, int offset, byte[] data) => Send(new PeerMessage.Piece(pieceIndex, offset, data));
+
     private void Send(PeerMessage message) => _outbox.Writer.TryWrite(message);
 
     private async Task WriteLoopAsync(CancellationToken cancellationToken)
@@ -177,7 +183,11 @@ public partial class PeerConnection(IPEndPoint endpoint, byte[] infoHash, string
         try
         {
             await foreach (var message in _outbox.Reader.ReadAllAsync(cancellationToken))
+            {
                 await _stream!.WriteAsync(PeerMessageCodec.Encode(message), cancellationToken);
+                if (message is PeerMessage.Piece piece)
+                    _engineChannel!.TryWrite(new BlockSent(this, piece.Data.Length));
+            }
         }
         catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
         {
