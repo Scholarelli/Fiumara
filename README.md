@@ -13,15 +13,18 @@ Give it some time, let it grow.
 - Keeps in memory only the pieces in progress: a piece's buffer is released once it is on disk.
 - Uploads too: sends its bitfield, unchokes the interested peers that give it the most plus an optimistic one (never
   giving a regular slot to a peer that snubs it), and serves their requests by reading the blocks back from disk.
+- Keeps seeding once the download is complete, until the host stops it (Ctrl+C in the CLI) or an error does, such as
+  a file that can no longer be read: either way peers, ticker and file are closed in order, and `Completion` ends
+  with the reason.
 
 ## Roadmap
 
 ### Now: becoming a seeder
 
 - [x] **Piece state.** Answer "do I have piece i?" and "do I have everything?".
-- [ ] **Shutdown and an explicit lifecycle.** One way to stop ticker, peers, storage and loop, used when the
-  download ends, when the host asks (`StopAsync`/`DisposeAsync`) and when the loop crashes. `Completion` means
-  "the engine stopped".
+- [x] **Shutdown and an explicit lifecycle.** One way to stop ticker, peers, storage and loop, used when the host
+  asks (`StopAsync`/`DisposeAsync`) and when the engine fails. `Completion` means "the engine stopped", and `State`
+  says how.
 - [x] **Upload on the connections we already have.** Our bitfield, a choker written as a pure function, and
   requests served from disk, with `Cancel` honoured and the queue of a peer we choke dropped.
 - [ ] **Incoming connections.** Listen on `ListenPort` and accept the inbound handshake.
